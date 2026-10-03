@@ -1179,6 +1179,38 @@ function limpiarTemporal(){
    EVENTOS
    ============================================================ */
 document.addEventListener('DOMContentLoaded', function(){
+
+  /* --- Guarda de entorno ---------------------------------------------
+     Esta interfaz usa google.script.run, que SOLO existe cuando Apps
+     Script sirve la pagina (script.google.com/macros/s/.../exec).
+     Si se abre el archivo con doble clic o desde GitHub Pages no hay
+     servidor, y conviene decirlo claro en vez de mostrar un error. */
+  if (typeof google === 'undefined' || !google.script || !google.script.run) {
+    Array.prototype.forEach.call(
+      document.querySelectorAll('.zona, .config, .pestanas'),
+      function(e){ e.style.opacity = '0.35'; e.style.pointerEvents = 'none'; });
+    var c = $('mensajes');
+    if (c) {
+      c.innerHTML =
+        '<div class="aviso err" style="font-size:14px">' +
+        '<b>Esta es la versi&oacute;n de Google Apps Script y no tiene servidor aqu&iacute;.</b><br><br>' +
+        'El objeto <span class="mono">google.script.run</span> solo existe cuando Apps Script sirve ' +
+        'la p&aacute;gina. Al abrirla como un archivo normal no hay nada que atienda las peticiones.<br><br>' +
+        '<b>Elija una de estas dos v&iacute;as:</b><br><br>' +
+        '<b>1) En la nube</b> &mdash; pegue <span class="mono">Code.gs</span> y esta interfaz en ' +
+        '<span class="mono">script.google.com</span>, despliegue como Aplicaci&oacute;n web y abra ' +
+        'la direcci&oacute;n <span class="mono">/exec</span>.<br><br>' +
+        '<b>2) En el navegador (recomendado)</b> &mdash; suba el archivo ' +
+        '<span class="mono">una-sola-pagina/index.html</span> a GitHub Pages, o &aacute;brgalo con ' +
+        'doble clic para probarlo. No requiere cuenta y ning&uacute;n dato sale del equipo.' +
+        '</div>';
+    }
+    var s = $('selloVersion');
+    if (s) s.textContent = 'sin servidor';
+    return;
+  }
+  /* --- Fin de la guarda ------------------------------------------------ */
+
   $('fileSiath').addEventListener('change', function(){
     subir('siath','fileSiath','zonaSiath','infoSiath','barraSiath','hojaSiath').catch(function(){});
   });
