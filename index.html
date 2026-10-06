@@ -1,11 +1,26 @@
+<!--
+  ============================================================================
+   ANÃLISIS DE NÃ“MINA JESEP Â· SIATH Â· LSI Â· DATA  Â·  POLICÃA NACIONAL DE COLOMBIA
+   ----------------------------------------------------------------------------
+   VERSIÃ“N AUTOCONTENIDA â€” todo el cÃ³digo estÃ¡ dentro de este mismo archivo.
+
+   Para publicar en GitHub Pages: suba ESTE archivo como `index.html` en la
+   raÃ­z del repositorio. No necesita ninguna carpeta ni archivo adicional.
+
+   Procesa los archivos de Excel directamente en el navegador:
+   ningÃºn dato se envÃ­a a ningÃºn servidor, ni a Google, ni a ningÃºn sitio.
+
+   Requisito del navegador: Chrome 103+, Edge 103+, Firefox 113+ o Safari 16.4+
+   (usa la API nativa DecompressionStream para abrir los .xlsx).
+  ============================================================================
+-->
 <!DOCTYPE html>
 <html lang="es">
 <head>
-<base target="_top">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Cruce SIATH · LSI · DATA — JESEP</title>
-
+<title>AnÃ¡lisis de NÃ³mina JESEP Â· SIATH Â· LSI Â· DATA</title>
+<meta name="description" content="Cruce de informaciÃ³n de las bases SIATH, LSI y DATA de la Jefatura Nacional de Servicio de PolicÃ­a. Procesamiento 100% local en el navegador.">
 <style>
 /* ============================================================
    PALETA INSTITUCIONAL — POLICÍA NACIONAL DE COLOMBIA
@@ -29,7 +44,6 @@
   --radio:14px;
 }
 
-
 *{box-sizing:border-box}
 html,body{height:100%}
 body{
@@ -39,7 +53,6 @@ body{
   background:var(--pn-noche);
   overflow-x:hidden;
 }
-
 
 /* ============================================================
    FONDO HOLOGRÁFICO INSTITUCIONAL (3 capas animadas)
@@ -318,6 +331,7 @@ td.cent{text-align:center; white-space:nowrap}
 </head>
 
 <body>
+
 <div class="holo"></div>
 <div class="holo-grid"></div>
 
@@ -490,28 +504,2055 @@ td.cent{text-align:center; white-space:nowrap}
 
   <div class="pie">
     <b>Jefatura Nacional de Servicio de Policía (JESEP)</b> · Sistema de cruce de información SIATH · LSI · DATA<br>
-    Los archivos se procesan en un servidor temporal de Drive y se eliminan con el botón
-    <span class="kbd">Limpiar temporal</span>.
+    Procesamiento <b>100 % local</b>: los archivos se leen y analizan en este navegador.
+    <b>Ningún dato se envía a un servidor.</b> Use el botón
+    <span class="kbd">Limpiar temporal</span> para liberar los archivos de la memoria.
   </div>
 
 </div>
 
+
 <script>
-/* ============================================================
-   ESTADO
-   ============================================================ */
+/* ===== engine.js ===== */
+/* =====================================================================
+ *  MOTOR DE ANALISIS - version web (GitHub Pages / cualquier navegador)
+ *  Mismo motor que Code.gs (version Apps Script). Solo funciones puras:
+ *  no usa Google Apps Script, Drive ni red. La lectura de .xlsx esta
+ *  en js/xlsx.js y la generacion de .docx en js/docx.js.
+ * ===================================================================== */
+'use strict';
+
+var CFG = {
+  VERSION: 'JESEP-CRUCE-1.0.0',
+
+  // Palabra usada para el filtro transversal de todas las bases.
+  PALABRA_FILTRO: 'JESEP',
+
+  // Marcador de "novedades adicionales de nómina" (conteo solicitado).
+  MARCADOR_ADICIONALES: 'NOVEDADES_ADICIONALES_NOMINA',
+
+  // Carpetas temporales de Drive (se crean solas la primera vez).
+  CARPETA_TEMP: 'JESEP_CRUCE_TMP',
+
+  // Hoja preferida por base (vacío = detección automática).
+  HOJA_SIATH_PREF: 'JESEP',
+  HOJA_LSI_PREF: '',
+  HOJA_DATA_PREF: '',
+
+  // Límites de seguridad (evitan agotar memoria/hoja de cálculo).
+  MAX_BYTES_PKG: 90 * 1024 * 1024,   // tamaño máximo del .xlsx
+  MAX_BYTES_HOJA: 34 * 1024 * 1024,  // tamaño máximo del XML de una hoja
+  MAX_FILAS: 200000,                 // filas máximas leídas por hoja
+  MAX_DETALLE: 3000,                 // filas de detalle máxima por concepto
+  MAX_NOVEDADES: 60000,
+
+  // Número de páginas del Word (se recalcula al construir el documento).
+  PAGINAS_ESTIMADAS: '1'
+};
+
+var ALIAS = {
+  /* ---- BASE SIATH ---- */
+  SIATH: {
+    id:          ['IDENTIFICACION', 'IDENTIFICACION_NUEVA', 'ID', 'CEDULA', 'NUMERO_IDENTIFICACION', 'NUI'],
+    nombre:      ['NOMBRE', 'NOMBRES', 'NOMBRE_COMPLETO', 'NOMBRE_Y_APELLIDOS', 'APELLIDOS_Y_NOMBRES', 'NOMBRE_DEL_FUNCIONARIO'],
+    unidad:      ['UNIDAD', 'FUERZA', 'UNDE_FUERZA', 'DEPENDENCIA', 'UNIDAD_DE_TRABAJO'],
+    grado:       ['GRADO', 'GRAD_ALFABETICO', 'GRADO_ALFABETICO'],
+    estado:      ['ESTADO_EMPLEADO', 'ESTADO', 'SITUACION'],
+    devengado:   ['TOTAL_DEVENGADO', 'DEVENGADO', 'VALOR_DEVENGADO'],
+    neto:        ['NETO', 'VALOR_NETO', 'NETO_PAGADO'],
+    descripcion: ['DESCRIPCION_DEPENDENCIA', 'DESCRIPCION', 'DEPENDENCIA'],
+    cargo:       ['CARGO', 'CARGO_PRESENTE', 'DENOMINACION_CARGO'],
+    ordenPublico:['ORDEN_PUBLICO_AUTOMATICO', 'ORDEN_PUBLICO', 'OPA'],
+    embargos:    ['EMBARGOS_APLICADOS', 'EMBARGO_APLICADO', 'EMBARGOS'],
+    embFamilia:  ['EMB_FAMILIA', 'EMBARGO_FAMILIA', 'EMB_FAMILIAR'],
+    embEjecutivo:['EMB_EJECUTIVO', 'EMBARGOS_EJECUTIVOS'],
+    embRemanente:['EMB_REMANENTES', 'EMBARGOS_REMANENTES'],
+    otrosDocs:   ['OTROS_DCTOS_PENDIENTES', 'OTROS_DOCUMENTOS'],
+    menos50:     ['DEVENGA_MENOS_50_SALARIO', 'MENOS_50_SALARIO']
+  },
+  /* ---- BASE LSI (novedades generales) ---- */
+  LSI: {
+    id:          ['IDENTIFICACION', 'IDENTIFICACION_NUEVA', 'ID', 'CEDULA', 'NUMERO_IDENTIFICACION'],
+    nombres:     ['NOMBRES', 'NOMBRE'],
+    apellidos:   ['APELLIDOS', 'APELLIDO', 'NOMBRES (#1)'],
+    descripcion: ['DESCRIPCION', 'DESCRIPCION_NOVEDAD', 'TIPO_NOVEDAD', 'NOVEDAD'],
+    claseNov:    ['NOVE_ID_CLASE_NOVEDAD', 'CLASE_NOVEDAD', 'ID_CLASE_NOVEDAD'],
+    anioMes:     ['ANO_MES', 'ANOMES', 'PERIODO', 'ANO_MES_NOVEDAD'],
+    fisica:      ['FISICA_ACTUAL', 'FISICA'],
+    unidad:      ['UNDE_FUERZA', 'FUERZA', 'UNIDAD'],
+    disp:        ['NUMERO_DISPOSICION', 'DISP_ID_DISPOSICION', 'DISPOSICION'],
+    fechaDisp:   ['FECHA_DISPOSICION', 'FECHA_DISPOSICION'],
+    fechaFis:    ['FECHA_FISCAL'],
+    diasLic:     ['DIAS_LICENCIA', 'DIAS_NO_LABORAR', 'NUM_DIAS_NO_LABORAR'],
+    diasVac:     ['DIAS_VACACIONES', 'DIAS_PEND_VACACIONES', 'DIAS_VACACIONES_DEROGA'],
+    diasCom:     ['NUMERO_DIAS_COMISION', 'NUMERO_DIAS_COMISION'],
+    tipoComExt:  ['TIPO_COMISION_EXTERIOR', 'TIPO_COMISION', 'LUGAR_COMISION'],
+    proc:        ['NUMERO_PROCESO', 'F_PROCESO_INTERFAZ'],
+    cond:        ['CONDICION_REGISTRO', 'CONDICION'],
+    tipoInc:     ['TIPO_INCAPACIDAD', 'NUMERO_INCAPACIDAD'],
+    estado:      ['DESTADO_INTERFAZ', 'ESTADO'],
+    adic:        ['NOVEDADES_ADICIONALES_NOMINA', 'ADICIONALES_NOMINA', 'NOVEDAD_ADICIONAL', 'ADICIONAL'],
+
+    // --- Datos de traslado: unidad de origen y de destino ---
+    consecutivoActual: ['EMPL_CONSECUTIVO', 'UNDE_CONSECUTIVO_EMPLEADO', 'CONSECUTIVO_EMPLEADO'],
+    fuerzaActual:     ['EMPL_UNDE_FUERZA', 'FUERZA_EMPLEADO'],
+    destinoNomina:    ['UNDE_CONSECUTIVO_TRASLA_NOMI', 'UNDE_CONSEC_TRASLA_NOMI', 'CONSECUTIVO_TRASLADO_NOMI'],
+    destinoLabor:     ['UNDE_CONSECUTIVO_TRASLA_LABOR', 'UNDE_CONSEC_TRASLA_LABOR', 'CONSECUTIVO_TRASLADO_LABOR'],
+    fuerzaDestino:    ['UNDE_FUERZA_TRASLA_LABOR', 'UNDE_FUERZA_TRASLA_NOMI', 'FUERZA_TRASLADO'],
+    creadoPor:        ['CREADO_POR', 'USUARIO_CREACION']
+  },
+  /* ---- BASE DATA (reporte de incapacidades) ---- */
+  DATA: {
+    id:          ['IDENTIFICACION', 'ID', 'CEDULA', 'NUMERO_IDENTIFICACION'],
+    nombres:     ['NOMBRES', 'NOMBRE'],
+    apellidos:   ['APELLIDOS', 'APELLIDO'],
+    categoria:   ['CATEGORIA', 'DESCRIPCION', 'TIPO_EXCUSA', 'CONCEPTO'],
+    sigla:       ['SIGLA_FISICA', 'SIGLA', 'ALFABETICO'],
+    dias:        ['NUMERO_DIAS', 'DIAS', 'DIAS_LICENCIA'],
+    fechaInicio: ['ID_FECHFISC_AUS_LABORAL', 'FECHA_INICIO', 'FECHA_FISCAL'],
+    fechaFin:    ['FECHA_FINAL', 'FECHA_TERMINO'],
+    tipoExcusa:  ['TIPO_EXCUSA'],
+    descripcion: ['DESCRIPCION_DEPENDENCIA', 'DESCRIPCION'],
+    cargo:       ['CARGO'],
+    disposicion: ['NUMERO_DISPOSICION', 'DISPOSICION'],
+    ultimaOp:    ['ULTIMA_OPERACION']
+  },
+  /* ---- NOVEDADES SUBIDAS (validación) ---- */
+  NOV: {
+    id:          ['IDENTIFICACION', 'ID', 'CEDULA', 'NUMERO_IDENTIFICACION', 'IDENTIFICACION_NUEVA'],
+    nombres:     ['NOMBRES', 'NOMBRE'],
+    apellidos:   ['APELLIDOS', 'APELLIDO'],
+    descripcion: ['DESCRIPCION', 'NOVEDAD', 'TIPO_NOVEDAD', 'DESCRIPCION_NOVEDAD'],
+    anioMes:     ['ANO_MES', 'PERIODO'],
+    fecha:       ['FECHA', 'FECHA_DISPOSICION', 'FECHA_REGISTRO', 'FECHA_NOVEDAD'],
+    referencia:  ['NUMERO_PROCESO', 'NUMERO_DISPOSICION', 'RADICADO', 'REFERENCIA', 'CONSECUTIVO'],
+    claseNov:    ['NOVE_ID_CLASE_NOVEDAD', 'CLASE_NOVEDAD'],
+    unidad:      ['UNIDAD', 'FUERZA', 'UNDE_FUERZA', 'DEPENDENCIA'],
+    cargo:       ['CARGO']
+  }
+};
+
+function norm_(v) {
+  if (v === null || v === undefined) return '';
+  var s = String(v);
+  if (s === '' || s === 'null' || s === 'undefined') return '';
+  s = s.toUpperCase();
+  s = s.replace(/[ÁÀÄÂ]/g, 'A').replace(/[ÉÈËÊ]/g, 'E')
+       .replace(/[ÍÌÏÎ]/g, 'I').replace(/[ÓÒÖÔ]/g, 'O')
+       .replace(/[ÚÙÜÛ]/g, 'U').replace(/Ñ/g, 'N').replace(/Ç/g, 'C');
+  return s;
+}
+
+function normCab_(v) {
+  return norm_(v).replace(/[^A-Z0-9]+/g, '_').replace(/^_+|_+$/g, '');
+}
+
+function txt_(v) {
+  if (v === null || v === undefined) return '';
+  var s = String(v);
+  if (s === 'null' || s === 'undefined' || s === 'NaN') return '';
+  return s.replace(/\s+/g, ' ').trim();
+}
+
+function idNorm_(v) {
+  var s = txt_(v);
+  if (!s) return '';
+  if (/^\d+(\.0+)?$/.test(s)) s = s.replace(/\.0+$/, '');
+  var d = s.replace(/\D/g, '');
+  return d;
+}
+
+function num_(v) {
+  if (v === null || v === undefined) return 0;
+  var s = String(v).replace(/\s/g, '').replace(/\.(?=\d{3}\b)/g, '');
+  s = s.replace(/[^0-9,.\-]/g, '').replace(/,/g, '.');
+  var n = parseFloat(s);
+  return isNaN(n) ? 0 : n;
+}
+
+function fmtInt_(n) {
+  var neg = n < 0;
+  n = Math.round(Math.abs(n));
+  var s = String(n), out = '', c = 0;
+  for (var i = s.length - 1; i >= 0; i--) {
+    out = s[i] + out;
+    c++;
+    if (c % 3 === 0 && i > 0) out = '.' + out;
+  }
+  return (neg ? '-' : '') + out;
+}
+
+function fmtMon_(n) {
+  var neg = n < 0;
+  var s = fmtInt_(Math.abs(n));
+  return (neg ? '-$ ' : '$ ') + s;
+}
+
+function separarNombre_(completo) {
+  var s = txt_(completo);
+  if (!s) return { nombres: '', apellidos: '' };
+  var p = s.split(' ');
+  if (p.length <= 1) return { nombres: s, apellidos: '' };
+  var nNombres = p.length >= 4 ? 2 : 1;
+  if (p.length === 2) nNombres = 1;
+  if (p.length === 3) nNombres = 2;
+  return {
+    apellidos: p.slice(0, p.length - nNombres).join(' '),
+    nombres: p.slice(p.length - nNombres).join(' ')
+  };
+}
+
+function escXml_(v) {
+  return txt_(v)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;').replace(/'/g, '&apos;');
+}
+
+function escHtml_(v) {
+  return escXml_(v).replace(/\r?\n/g, '<br>');
+}
+
+function decXml_(s) {
+  if (!s) return '';
+  return s.replace(/&lt;/g, '<').replace(/&gt;/g, '>')
+          .replace(/&quot;/g, '"').replace(/&apos;/g, "'")
+          .replace(/&#(\d+);/g, function (_, n) { return String.fromCharCode(n); })
+          .replace(/&#x([0-9a-fA-F]+);/g, function (_, h) { return String.fromCharCode(parseInt(h, 16)); })
+          .replace(/&amp;/g, '&');
+}
+
+function esVerdad_(v) {
+  var s = norm_(txt_(v));
+  if (!s) return false;
+  return ['SI', 'S', '1', 'X', 'VERDADERO', 'TRUE', 'V', 'Y', 'YES'].indexOf(s) >= 0;
+}
+
+function nuevoId_(prefijo) {
+  return prefijo + '-' + Utilities.getUuid().slice(0, 13);
+}
+
+function mapearColumnas_(cabeceras, alias) {
+  var mapa = {};
+  var norm = cabeceras.map(normCab_);
+  for (var clave in alias) {
+    if (!alias.hasOwnProperty(clave)) continue;
+    mapa[clave] = -1;
+    for (var i = 0; i < norm.length; i++) {
+      if (norm[i] === alias[clave][0]) { mapa[clave] = i; break; }
+    }
+  }
+  // Segunda pasada: coincidencia por "contiene" en orden de alias
+  for (var clave2 in alias) {
+    if (!alias.hasOwnProperty(clave2)) continue;
+    if (mapa[clave2] >= 0) continue;
+    for (var a = 0; a < alias[clave2].length; a++) {
+      var objetivo = alias[clave2][a];
+      for (var j = 0; j < norm.length; j++) {
+        if (norm[j] === objetivo || norm[j].indexOf(objetivo) >= 0 || objetivo.indexOf(norm[j]) >= 0) {
+          if (norm[j].length >= 3) { mapa[clave2] = j; break; }
+        }
+      }
+      if (mapa[clave2] >= 0) break;
+    }
+  }
+  return mapa;
+}
+
+function val_(fila, mapa, clave) {
+  var i = mapa[clave];
+  if (i === undefined || i < 0 || i >= fila.length) return '';
+  return txt_(fila[i]);
+}
+
+function filaContiene_(fila, palabra) {
+  var p = norm_(palabra);
+  if (!p) return false;
+  for (var i = 0; i < fila.length; i++) {
+    if (fila[i] !== undefined && fila[i] !== '' && norm_(fila[i]).indexOf(p) >= 0) return true;
+  }
+  return false;
+}
+
+function leerSiath_(tabla, config) {
+  var m = mapearColumnas_(tabla.cabeceras, ALIAS.SIATH);
+  if (m.id < 0) throw new Error('BASE SIATH: no se encontró la columna IDENTIFICACION. Encabezados: ' +
+    tabla.cabeceras.slice(0, 25).join(', '));
+
+  var palabra = norm_(config.palabraFiltro || CFG.PALABRA_FILTRO);
+  var soloPalabra = config.filtrarPorPalabra !== false;
+  var salida = [], stats = { leidas: tabla.filas.length, conPalabra: 0, fueraDeFiltro: 0 };
+
+  for (var i = 0; i < tabla.filas.length; i++) {
+    var f = tabla.filas[i];
+    var id = idNorm_(val_(f, m, 'id'));
+    if (!id) continue;
+
+    var coincidePalabra = filaContiene_(f, palabra);
+    if (coincidePalabra) stats.conPalabra++;
+
+    // Filtro: la persona debe pertenecer a la unidad/palabra buscada.
+    if (soloPalabra && !coincidePalabra) { stats.fueraDeFiltro++; continue; }
+
+    var nombreCompleto = val_(f, m, 'nombre');
+    var partes = separarNombre_(nombreCompleto);
+
+    salida.push({
+      id: id,
+      nombreCompleto: nombreCompleto,
+      nombres: partes.nombres,
+      apellidos: partes.apellidos,
+      unidad: val_(f, m, 'unidad'),
+      grado: val_(f, m, 'grado'),
+      estado: val_(f, m, 'estado'),
+      devengado: num_(val_(f, m, 'devengado')),
+      neto: num_(val_(f, m, 'neto')),
+      descripcion: val_(f, m, 'descripcion'),
+      cargo: val_(f, m, 'cargo'),
+      ordenPublico: txt_(val_(f, m, 'ordenPublico')),
+      embargos: num_(val_(f, m, 'embargos')),
+      embFamilia: num_(val_(f, m, 'embFamilia')),
+      embEjecutivo: num_(val_(f, m, 'embEjecutivo')),
+      embRemanente: num_(val_(f, m, 'embRemanente')),
+      otrosDocs: num_(val_(f, m, 'otrosDocs')),
+      menos50: txt_(val_(f, m, 'menos50')),
+      tienePalabra: coincidePalabra
+    });
+  }
+
+  // Red de seguridad: si la columna buscada no marcaba nada (hoja completa sin
+  // la palabra), se reintenta sin el filtro para no entregar un padrón vacío.
+  if (soloPalabra && salida.length === 0 && stats.leidas > 0) {
+    stats.aviso = 'Ninguna fila de BASE SIATH contiene la palabra "' + palabra +
+      '". Se reprocesó la hoja sin ese filtro: use la hoja "' + CFG.PALABRA_FILTRO +
+      '" para obtener el padrón filtrado.';
+    salida = releerSiathSinFiltro_(tabla, m, stats.leidas);
+  }
+  return { filas: salida, mapa: m, stats: stats };
+}
+
+function releerSiathSinFiltro_(tabla, m, limite) {
+  var salida = [];
+  var n = Math.min(limite, tabla.filas.length);
+  for (var i = 0; i < n; i++) {
+    var f = tabla.filas[i];
+    var id = idNorm_(val_(f, m, 'id'));
+    if (!id) continue;
+    var nombreCompleto = val_(f, m, 'nombre');
+    var partes = separarNombre_(nombreCompleto);
+    salida.push({
+      id: id, nombreCompleto: nombreCompleto,
+      nombres: partes.nombres, apellidos: partes.apellidos,
+      unidad: val_(f, m, 'unidad'), grado: val_(f, m, 'grado'),
+      estado: val_(f, m, 'estado'), devengado: num_(val_(f, m, 'devengado')),
+      neto: num_(val_(f, m, 'neto')), descripcion: val_(f, m, 'descripcion'),
+      cargo: val_(f, m, 'cargo'), ordenPublico: txt_(val_(f, m, 'ordenPublico')),
+      embargos: num_(val_(f, m, 'embargos')), embFamilia: num_(val_(f, m, 'embFamilia')),
+      embEjecutivo: num_(val_(f, m, 'embEjecutivo')), embRemanente: num_(val_(f, m, 'embRemanente')),
+      otrosDocs: num_(val_(f, m, 'otrosDocs')), menos50: txt_(val_(f, m, 'menos50')),
+      tienePalabra: false
+    });
+  }
+  return salida;
+}
+
+function leerLsi_(tabla, config) {
+  var m = mapearColumnas_(tabla.cabeceras, ALIAS.LSI);
+  if (m.id < 0) throw new Error('BASE LSI: no se encontró la columna IDENTIFICACION. Encabezados: ' +
+    tabla.cabeceras.slice(0, 25).join(', '));
+
+  var salida = [], stats = { leidas: tabla.filas.length, conPalabra: 0 };
+  var periodo = '';
+
+  for (var i = 0; i < tabla.filas.length; i++) {
+    var f = tabla.filas[i];
+    var id = idNorm_(val_(f, m, 'id'));
+    if (!id) continue;
+    if (filaContiene_(f, config.palabraFiltro || CFG.PALABRA_FILTRO)) stats.conPalabra++;
+    if (!periodo && m.anioMes >= 0) periodo = val_(f, m, 'anioMes');
+
+    var nombres = val_(f, m, 'nombres');
+    var apellidos = val_(f, m, 'apellidos');
+    if (!apellidos && !nombres) {
+      var sp = separarNombre_(val_(f, m, 'nombre'));
+      nombres = sp.nombres; apellidos = sp.apellidos;
+    }
+
+    salida.push({
+      id: id,
+      nombres: nombres,
+      apellidos: apellidos,
+      nombreCompleto: txt_([apellidos, nombres].filter(String).join(' ')),
+      descripcion: val_(f, m, 'descripcion'),
+      descripcionNorm: norm_(val_(f, m, 'descripcion')),
+      clase: val_(f, m, 'claseNov'),
+      anioMes: val_(f, m, 'anioMes'),
+      fisica: val_(f, m, 'fisica'),
+      unidad: val_(f, m, 'unidad'),
+      disposicion: val_(f, m, 'disp'),
+      fechaDisposicion: val_(f, m, 'fechaDisp'),
+      fechaFiscal: val_(f, m, 'fechaFis'),
+      diasLicencia: num_(val_(f, m, 'diasLic')),
+      diasVacaciones: num_(val_(f, m, 'diasVac')),
+      diasComision: num_(val_(f, m, 'diasCom')),
+      comisionExterior: txt_(val_(f, m, 'tipoComExt')),
+      proceso: val_(f, m, 'proc'),
+      condicion: val_(f, m, 'cond'),
+      tipoIncapacidad: val_(f, m, 'tipoInc'),
+      estado: val_(f, m, 'estado'),
+      adicional: esVerdad_(val_(f, m, 'adic')),
+      columnaAdicional: txt_(val_(f, m, 'adic')),
+
+      // Datos de traslado (origen vs destino)
+      fisicaActual: txt_(val_(f, m, 'fisica')),
+      consecutivoActual: txt_(val_(f, m, 'consecutivoActual')),
+      fuerzaActual: txt_(val_(f, m, 'fuerzaActual')),
+      destinoNomina: txt_(val_(f, m, 'destinoNomina')),
+      destinoLabor: txt_(val_(f, m, 'destinoLabor')),
+      fuerzaDestino: txt_(val_(f, m, 'fuerzaDestino')),
+      creadoPor: txt_(val_(f, m, 'creadoPor'))
+    });
+  }
+  return { filas: salida, mapa: m, stats: stats, periodo: periodo };
+}
+
+function leerData_(tabla, config) {
+  var m = mapearColumnas_(tabla.cabeceras, ALIAS.DATA);
+  if (m.id < 0) throw new Error('BASE DATA: no se encontró la columna IDENTIFICACION. Encabezados: ' +
+    tabla.cabeceras.slice(0, 25).join(', '));
+
+  var salida = [], stats = { leidas: tabla.filas.length, conPalabra: 0 };
+  for (var i = 0; i < tabla.filas.length; i++) {
+    var f = tabla.filas[i];
+    var id = idNorm_(val_(f, m, 'id'));
+    if (!id) continue;
+    if (filaContiene_(f, config.palabraFiltro || CFG.PALABRA_FILTRO)) stats.conPalabra++;
+
+    salida.push({
+      id: id,
+      nombres: val_(f, m, 'nombres'),
+      apellidos: val_(f, m, 'apellidos'),
+      nombreCompleto: txt_([val_(f, m, 'apellidos'), val_(f, m, 'nombres')].filter(String).join(' ')),
+      categoria: val_(f, m, 'categoria'),
+      categoriaNorm: norm_(val_(f, m, 'categoria')),
+      sigla: val_(f, m, 'sigla'),
+      dias: num_(val_(f, m, 'dias')),
+      fechaInicio: val_(f, m, 'fechaInicio'),
+      fechaFin: val_(f, m, 'fechaFin'),
+      tipoExcusa: val_(f, m, 'tipoExcusa'),
+      descripcion: val_(f, m, 'descripcion'),
+      cargo: val_(f, m, 'cargo'),
+      disposicion: val_(f, m, 'disposicion'),
+      ultimaOperacion: val_(f, m, 'ultimaOp')
+    });
+  }
+  return { filas: salida, mapa: m, stats: stats };
+}
+
+function construirIndices_(arr) {
+  var s = {};
+  for (var i = 0; i < arr.length; i++) s[arr[i].id] = true;
+  return s;
+}
+
+function cuantificar_(registros) {
+  var ids = {};
+  var dias = 0;
+  for (var i = 0; i < registros.length; i++) {
+    ids[registros[i].id] = true;
+    dias += registros[i]._dias || 0;
+  }
+  var n = 0;
+  for (var k in ids) if (ids.hasOwnProperty(k)) n++;
+  return {
+    registros: registros.length,
+    funcionarios: n,
+    dias: dias,
+    detalle: registros.slice(0, CFG.MAX_DETALLE),
+    truncado: registros.length > CFG.MAX_DETALLE
+  };
+}
+
+function buscarEnLsi_(lsi, predicado) {
+  var out = [];
+  for (var i = 0; i < lsi.length; i++) {
+    if (predicado(lsi[i])) out.push(lsi[i]);
+  }
+  return out;
+}
+
+function detectarAdicionales_(lsi, marcador) {
+  var marcas = [];
+  var out = [];
+  var mk = norm_(marcador || CFG.MARCADOR_ADICIONALES);
+  for (var i = 0; i < lsi.length; i++) {
+    var r = lsi[i];
+    var d = norm_(r.descripcion);
+    var esAdicional = false, motivo = '';
+    if (d.indexOf('ADICIONAL') >= 0) { esAdicional = true; motivo = 'DESCRIPCION contiene "ADICIONAL"'; }
+    if (r.adicional) { esAdicional = true; motivo = motivo || 'Columna de adicionales = verdadero'; }
+    if (mk && d.indexOf(mk) >= 0) { esAdicional = true; motivo = motivo || 'Marcador ' + marcador; }
+    if (esAdicional) {
+      r._dias = 0;
+      r._motivo = motivo;
+      out.push(r);
+      marcas[motivo] = (marcas[motivo] || 0) + 1;
+    }
+  }
+  return { filas: out, senales: marcas };
+}
+
+function combinar_(a, b) {
+  var out = [];
+  for (var i = 0; i < a.length; i++) out.push(a[i]);
+  for (var j = 0; j < b.length; j++) out.push(b[j]);
+  return out;
+}
+
+function detalleLsi_(r) {
+  return {
+    id: r.id,
+    nombres: r.nombres,
+    apellidos: r.apellidos,
+    nombreCompleto: r.nombreCompleto,
+    descripcion: r.descripcion,
+    categoria: r.categoria || '',
+    clase: r.clase,
+    anioMes: r.anioMes,
+    dias: r._dias || r.diasLicencia || r.diasVacaciones || r.diasComision || 0,
+    diasVacaciones: r.diasVacaciones,
+    diasLicencia: r.diasLicencia,
+    diasComision: r.diasComision,
+    comisionExterior: r.comisionExterior,
+    disposicion: r.disposicion,
+    fechaDisposicion: r.fechaDisposicion,
+    proceso: r.proceso,
+    unidad: r.unidad,
+    fisica: r.fisica,
+    motivo: r._motivo || ''
+  };
+}
+
+function detalleData_(r) {
+  return {
+    id: r.id,
+    nombres: r.nombres,
+    apellidos: r.apellidos,
+    nombreCompleto: r.nombreCompleto,
+    categoria: r.categoria,
+    dias: r.dias,
+    sigla: r.sigla,
+    fechaInicio: r.fechaInicio,
+    fechaFin: r.fechaFin,
+    tipoExcusa: r.tipoExcusa,
+    descripcion: r.descripcion,
+    cargo: r.cargo,
+    disposicion: r.disposicion,
+    unidad: r.descripcion
+  };
+}
+
+function detalleSiath_(r) {
+  return {
+    id: r.id,
+    nombres: r.nombres,
+    apellidos: r.apellidos,
+    nombreCompleto: r.nombreCompleto,
+    unidad: r.unidad,
+    grado: r.grado,
+    cargo: r.cargo,
+    descripcion: r.descripcion,
+    estado: r.estado,
+    devengado: r.devengado,
+    neto: r.neto,
+    ordenPublico: r.ordenPublico,
+    embargos: r.embargos,
+    embFamilia: r.embFamilia,
+    embEjecutivo: r.embEjecutivo,
+    dias: r._dias || 0
+  };
+}
+
+function objetoDetalle_(filas, origen) {
+  var q = cuantificar_(filas);
+  var det = [];
+  for (var i = 0; i < filas.length && det.length < CFG.MAX_DETALLE; i++) {
+    var r = filas[i];
+    var base;
+    if (r._tipo === 'DATA') base = detalleData_(r);
+    else if (r._tipo === 'SIATH') base = detalleSiath_(r);
+    else base = detalleLsi_(r);
+    base.origen = origen || r._tipo || '';
+    det.push(base);
+  }
+  q.detalle = det;
+  return q;
+}
+
+function resumenDependencias_(filas, limite) {
+  var c = {};
+  for (var i = 0; i < filas.length; i++) {
+    var d = filas[i].descripcion || filas[i].cargo || 'SIN DEPENDENCIA';
+    c[d] = (c[d] || 0) + 1;
+  }
+  var arr = [];
+  for (var k in c) if (c.hasOwnProperty(k)) arr.push({ dependencia: k, total: c[k] });
+  arr.sort(function (a, b) { return b.total - a.total; });
+  return arr.slice(0, limite || 20);
+}
+
+function construirMapaUnidades_(texto) {
+  var mapa = {};
+  if (!texto) return mapa;
+  var lineas = String(texto).split(/\r?\n/);
+  for (var i = 0; i < lineas.length; i++) {
+    var ln = txt_(lineas[i]);
+    if (!ln || ln.charAt(0) === '#') continue;
+    var sep = ln.indexOf('=');
+    if (sep < 0) sep = ln.indexOf(',');
+    if (sep < 0) continue;
+    var codigo = txt_(ln.substring(0, sep));
+    var nombre = txt_(ln.substring(sep + 1));
+    if (codigo && nombre) mapa[codigo] = nombre;
+  }
+  return mapa;
+}
+
+function nombreUnidad_(codigo, mapa) {
+  var c = txt_(codigo);
+  if (!c) return 'NO INFORMADO';
+  if (mapa && mapa[c]) return mapa[c] + ' (cód. ' + c + ')';
+  return 'Unidad código ' + c;
+}
+
+function analizarTraslados_(lsi, siathPorId, palabra, mapaUnidades) {
+  var origen = [];
+  var otros = [], iguales = 0, nominaDistintaLabor = 0, sinDestino = 0;
+
+  for (var i = 0; i < lsi.length; i++) {
+    var r = lsi[i];
+    if (r.descripcionNorm.indexOf('TRASLADO') < 0) continue;
+
+    var base = siathPorId[r.id];
+    var consActual = txt_(r.consecutivoActual);
+    var destLab = txt_(r.destinoLabor);
+    var destNom = txt_(r.destinoNomina);
+
+    if (!destLab && !destNom) { sinDestino++; continue; }
+
+    var destino = destLab || destNom;
+    var cambia = (consActual && destino && consActual !== destino);
+    var nominaVsLabor = (destLab && destNom && destLab !== destNom);
+    if (nominaVsLabor) nominaDistintaLabor++;
+    if (!cambia) iguales++;
+
+    origen.push({
+      id: r.id,
+      nombres: r.nombres,
+      apellidos: r.apellidos,
+      nombreCompleto: r.nombreCompleto,
+      unidadNominal: txt_(base ? (base.unidad || palabra) : palabra),
+      dependenciaNominal: base ? base.descripcion : '',
+      grado: base ? base.grado : '',
+      cargo: base ? base.cargo : '',
+      consecutivoActual: consActual,
+      unidadActual: nombreUnidad_(consActual, mapaUnidades),
+      destinoNomina: destNom,
+      destinoLaboral: destLab,
+      unidadDestino: nombreUnidad_(destino, mapaUnidades),
+      fuerzaDestino: txt_(r.fuerzaDestino),
+      cambiaUnidad: !!cambia,
+      nominaDistintaLabor: nominaVsLabor,
+      anioMes: r.anioMes,
+      disposicion: r.disposicion,
+      fechaDisposicion: r.fechaDisposicion,
+      proceso: r.proceso,
+      creadoPor: r.creadoPor
+    });
+  }
+
+  var fueraDeJESEP = [];
+  for (i = 0; i < origen.length; i++) if (origen[i].cambiaUnidad) fueraDeJESEP.push(origen[i]);
+
+  // Agrupación por unidad de destino
+  var porDestino = {};
+  for (i = 0; i < fueraDeJESEP.length; i++) {
+    var k = fueraDeJESEP[i].unidadDestino;
+    porDestino[k] = (porDestino[k] || 0) + 1;
+  }
+  var destinos = [];
+  for (var d in porDestino) if (porDestino.hasOwnProperty(d)) destinos.push({ unidad: d, total: porDestino[d] });
+  destinos.sort(function (a, b) { return b.total - a.total; });
+
+  var var_ids = fueraDeJESEP.map(function (x) { return x.id; });
+  var unicos = {};
+  for (i = 0; i < var_ids.length; i++) unicos[var_ids[i]] = true;
+  var nUnicos = 0;
+  for (var u in unicos) if (unicos.hasOwnProperty(u)) nUnicos++;
+
+  return {
+    total: origen.length,
+    fueraDeUnidad: fueraDeJESEP.length,
+    funcionariosFuera: nUnicos,
+    sinCambioDeUnidad: iguales,
+    nominaDistintaLabor: nominaDistintaLabor,
+    sinDestinoInformado: sinDestino,
+    porDestino: destinos,
+    detalle: fueraDeJESEP.slice(0, CFG.MAX_DETALLE),
+    detalleCompleto: origen.slice(0, CFG.MAX_DETALLE),
+    truncado: fueraDeJESEP.length > CFG.MAX_DETALLE
+  };
+}
+
+function analizarTablas_(tSiath, tLsi, tData, config) {
+  config = config || {};
+  var avisos = [];
+
+  var siath = leerSiath_(tSiath, config);
+  var lsiAll = leerLsi_(tLsi, config);
+  var dataAll = leerData_(tData, config);
+
+  var idxSiath = construirIndices_(siath.filas);
+  var idsSiath = siath.filas.map(function (r) { return r.id; });
+  var porIdSiath = {};
+  for (var pi = 0; pi < siath.filas.length; pi++) porIdSiath[siath.filas[pi].id] = siath.filas[pi];
+
+  // --- Filtro transversal por la palabra + pertenencia al padrón SIATH ---
+  function filtrarPorPadrón_(lista) {
+    var dentro = [], fuera = [];
+    for (var i = 0; i < lista.length; i++) {
+      if (idxSiath[lista[i].id]) dentro.push(lista[i]);
+      else fuera.push(lista[i]);
+    }
+    return { dentro: dentro, fuera: fuera };
+  }
+
+  var fLsi = filtrarPorPadrón_(lsiAll.filas);
+  var fData = filtrarPorPadrón_(dataAll.filas);
+  var lsi = fLsi.dentro;
+  var data = fData.dentro;
+
+  avisos.push('BASE SIATH: ' + siath.stats.leidas + ' filas leidas, ' +
+    siath.filas.length + ' funcionarios dentro del padron filtrado (' +
+    (config.palabraFiltro || CFG.PALABRA_FILTRO) + '), ' + siath.stats.fueraDeFiltro + ' excluidas.');
+  avisos.push('BASE LSI: ' + lsiAll.filas.length + ' filas leidas, ' + lsi.length +
+    ' pertenecen al padron SIATH, ' + fLsi.fuera.length + ' no pertenecen.');
+  avisos.push('BASE DATA: ' + dataAll.filas.length + ' filas leidas, ' + data.length +
+    ' pertenecen al padron SIATH, ' + fData.fuera.length + ' no pertenecen.');
+  if (siath.stats.aviso) avisos.push(siath.stats.aviso);
+  if (tSiath.truncado) avisos.push('BASE SIATH: la hoja supero el limite de ' + CFG.MAX_FILAS + ' filas y fue truncada.');
+  if (tLsi.truncado) avisos.push('BASE LSI: la hoja supero el limite de ' + CFG.MAX_FILAS + ' filas y fue truncada.');
+  if (tData.truncado) avisos.push('BASE DATA: la hoja supero el limite de ' + CFG.MAX_FILAS + ' filas y fue truncada.');
+
+  /* ---------------- Conteos solicitados ---------------- */
+
+  // 1) Adicionales de nómina
+  var ad = detectarAdicionales_(lsi, config.marcadorAdicional);
+  for (i = 0; i < ad.filas.length; i++) ad.filas[i]._tipo = 'LSI';
+  if (!ad.filas.length) {
+    avisos.push('Adicionales de nómina: 0 registros. El archivo LSI no trae la columna "' +
+      (config.marcadorAdicional || CFG.MARCADOR_ADICIONALES) +
+      '" ni descripciones con la palabra ADICIONAL.');
+  }
+
+  // 2) Incapacidades
+  var incLsi = buscarEnLsi_(lsi, function (r) { return r.descripcionNorm.indexOf('INCAPACIDAD') >= 0; });
+  var incData = [];
+  for (var i = 0; i < data.length; i++) {
+    if (data[i].categoriaNorm.indexOf('INCAPACIDAD') >= 0) incData.push(data[i]);
+  }
+  for (i = 0; i < incLsi.length; i++) { incLsi[i]._dias = incLsi[i].diasLicencia; incLsi[i]._tipo = 'LSI'; }
+  for (i = 0; i < incData.length; i++) { incData[i]._dias = incData[i].dias; incData[i]._tipo = 'DATA'; }
+  var incapacidad = combinar_(incLsi, incData);
+
+  // 3) Disfrute de vacaciones
+  var vacLsi = buscarEnLsi_(lsi, function (r) { return r.descripcionNorm.indexOf('VACACION') >= 0; });
+  var vacData = [];
+  for (i = 0; i < data.length; i++) {
+    if (data[i].categoriaNorm.indexOf('VACACION') >= 0) vacData.push(data[i]);
+  }
+  for (i = 0; i < vacLsi.length; i++) { vacLsi[i]._dias = vacLsi[i].diasVacaciones; vacLsi[i]._tipo = 'LSI'; }
+  for (i = 0; i < vacData.length; i++) { vacData[i]._dias = vacData[i].dias; vacData[i]._tipo = 'DATA'; }
+  var vacaciones = combinar_(vacLsi, vacData);
+
+  // 4) Embargos aplicados (SIATH)
+  var embargos = [];
+  for (i = 0; i < siath.filas.length; i++) {
+    if (siath.filas[i].embargos > 0) {
+      siath.filas[i]._dias = siath.filas[i].embargos;
+      siath.filas[i]._tipo = 'SIATH';
+      embargos.push(siath.filas[i]);
+    }
+  }
+
+  // 5) Embargos a favor de familia (SIATH)
+  var embFam = [];
+  for (i = 0; i < siath.filas.length; i++) {
+    if (siath.filas[i].embFamilia > 0) {
+      siath.filas[i]._dias = siath.filas[i].embFamilia;
+      siath.filas[i]._tipo = 'SIATH';
+      embFam.push(siath.filas[i]);
+    }
+  }
+
+  // 6) NO en orden público automático (SIATH)
+  var noOrden = [];
+  for (i = 0; i < siath.filas.length; i++) {
+    var op = norm_(siath.filas[i].ordenPublico);
+    if (op === 'NO' || op.indexOf('NO') === 0) {
+      siath.filas[i]._tipo = 'SIATH';
+      noOrden.push(siath.filas[i]);
+    }
+  }
+
+  // 7) Comisiones en el exterior (LSI)
+  var comExt = buscarEnLsi_(lsi, function (r) {
+    return r.descripcionNorm.indexOf('EXTERIOR') >= 0 || norm_(r.comisionExterior).indexOf('EXTERIOR') >= 0;
+  });
+  for (i = 0; i < comExt.length; i++) { comExt[i]._dias = comExt[i].diasComision; comExt[i]._tipo = 'LSI'; }
+
+  /* ---------------- Detalle por concepto ---------------- */
+
+  function grupo_(clave, etiqueta, universo, predicado,opts) {
+    opts = opts || {};
+    var filas = buscarEnLsi_(universo, predicado);
+    var base = [];
+    for (var j = 0; j < filas.length; j++) base.push(filas[j]);
+    var det = base.map(function (r) {
+      return {
+        id: r.id,
+        nombres: r.nombres,
+        apellidos: r.apellidos,
+        nombreCompleto: r.nombreCompleto,
+        descripcion: r.descripcion,
+        clase: r.clase,
+        anioMes: r.anioMes,
+        dias: r._dias || 0,
+        diasVacaciones: r.diasVacaciones,
+        diasLicencia: r.diasLicencia,
+        diasComision: r.diasComision,
+        comisionExterior: r.comisionExterior,
+        disposicion: r.disposicion,
+        fechaDisposicion: r.fechaDisposicion,
+        proceso: r.proceso,
+        categoria: r.categoria,
+        fisica: r.fisica,
+        unidad: r.unidad,
+        grado: r.grado,
+        cargo: r.cargo,
+        descripcionDep: r.descripcion || ''
+      };
+    });
+    var q = cuantificar_(base);
+    q.clave = clave;
+    q.etiqueta = etiqueta;
+    q.detalle = det.slice(0, CFG.MAX_DETALLE);
+    if (opts.nota) q.nota = opts.nota;
+    return q;
+  }
+
+  // Bloque 1 - Subsidios y bonificaciones (identificar quién)
+  var gruposSubsidio = [];
+  var bloquesSubsidio = [
+    { clave: 'DISMINUCION_SUBSIDIO', etiqueta: 'DISMINUCION DEL SUBSIDIO FAMILIAR',
+      pred: function (r) { return r.descripcionNorm.indexOf('DISMINUCION DEL SUBSIDIO FAMILIAR') >= 0; } },
+    { clave: 'EXTINCION_SUBSIDIO', etiqueta: 'EXTINCION DEL SUBSIDIO FAMILIAR',
+      pred: function (r) { return r.descripcionNorm.indexOf('EXTINCION DEL SUBSIDIO FAMILIAR') >= 0; } },
+    { clave: 'EXTINCION_BONIF', etiqueta: 'EXTINCION DEL DE LA BONIFICACION PARA LA ASISTENCIA FAMILIAR',
+      pred: function (r) { return r.descripcionNorm.indexOf('EXTINCION DEL DE LA BONIFICACION PARA LA ASISTENCIA FAMILIAR') >= 0; } },
+    { clave: 'BONIF_ASIST_FAM_ADIC', etiqueta: 'BONIFICACION PARA LA ASISTENCIA FAMILIAR (incluye NOVEDADES_ADICIONALES_NOMINA)',
+      pred: function (r) {
+        if (r.descripcionNorm.indexOf('BONIFICACION PARA LA ASISTENCIA FAMILIAR') < 0) return false;
+        if (r.descripcionNorm.indexOf('EXTINCION') >= 0) return false;   // las extinciones van aparte
+        if (r.descripcionNorm.indexOf('DISMINUCION') >= 0) return false;
+        return true;
+      } }
+  ];
+  for (i = 0; i < bloquesSubsidio.length; i++) {
+   gruposSubsidio.push(grupo_(bloquesSubsidio[i].clave, bloquesSubsidio[i].etiqueta, lsi, bloquesSubsidio[i].pred));
+  }
+
+  // Bloque 2 - Operativos (quién y cuántos)
+  var bloquesOperativos = [
+    { clave: 'TRASLADO', etiqueta: 'TRASLADO',
+      pred: function (r) { return r.descripcionNorm.indexOf('TRASLADO') >= 0; } },
+    { clave: 'ALTA_PENSIONADO', etiqueta: 'ALTA TITULAR PENSIONADO / ALTA SUSTITUTO PENSIONADO',
+      pred: function (r) { return r.descripcionNorm.indexOf('ALTA') >= 0 && r.descripcionNorm.indexOf('PENSIONADO') >= 0; },
+      nota: 'Incluye tanto el alta de titular como la de sustituto pensionado.' },
+    { clave: 'LICENCIA_MARIA', etiqueta: 'LICENCIA LEY MARIA (LICENCIA PATERNIDAD)',
+      pred: function (r) { return r.descripcionNorm.indexOf('LEY MARIA') >= 0 || r.descripcionNorm.indexOf('LICENCIA PATERNIDAD') >= 0; } },
+    { clave: 'LICENCIA_LUTO', etiqueta: 'LICENCIA REMUNERADA POR LUTO',
+      pred: function (r) { return r.descripcionNorm.indexOf('LUTO') >= 0; } },
+    { clave: 'BONIF_ASIST_FAM', etiqueta: 'BONIFICACION PARA LA ASISTENCIA FAMILIAR',
+      pred: function (r) { return r.descripcionNorm.indexOf('BONIFICACION PARA LA ASISTENCIA FAMILIAR') >= 0; } }
+  ];
+  var bloquesOps = [];
+  for (i = 0; i < bloquesOperativos.length; i++) {
+    bloquesOps.push(grupo_(bloquesOperativos[i].clave, bloquesOperativos[i].etiqueta, lsi,
+      bloquesOperativos[i].pred, { nota: bloquesOperativos[i].nota }));
+  }
+
+  /* ---------------- Armar reporte ---------------- */
+
+  var porPersona = {};
+  for (i = 0; i < siath.filas.length; i++) {
+    var p = siath.filas[i];
+    porPersona[p.id] = p.id;
+  }
+
+  var reporte = {
+    ok: true,
+    version: CFG.VERSION,
+    generadoEn: new Date().toISOString(),
+    configuracion: {
+      palabraFiltro: config.palabraFiltro || CFG.PALABRA_FILTRO,
+      marcadorAdicional: config.marcadorAdicional || CFG.MARCADOR_ADICIONALES,
+      cruzaBases: config.cruzaBases !== false
+    },
+    fuentes: {
+      siath: { hoja: tSiath.hoja, filasLeidas: tSiath.filas.length, filas: siath.filas.length,
+               conPalabra: siath.stats.conPalabra, bytes: tSiath.bytes, truncado: !!tSiath.truncado },
+      lsi: { hoja: tLsi.hoja, filasLeidas: tLsi.filas.length, filas: lsi.length,
+             fueraDelPadron: fLsi.fuera.length, conPalabra: lsiAll.stats.conPalabra,
+             periodo: lsiAll.periodo, bytes: tLsi.bytes, truncado: !!tLsi.truncado },
+      data: { hoja: tData.hoja, filasLeidas: tData.filas.length, filas: data.length,
+              fueraDelPadron: fData.fuera.length, conPalabra: dataAll.stats.conPalabra,
+              bytes: tData.bytes, truncado: !!tData.truncado }
+    },
+    funcionarios: {
+      // CANTIDAD TOTAL DE PERSONAL NOMINADO según BASE SIATH
+      nominados: siath.filas.length,
+      identificaciones: idsSiath.length,
+      filasLeidasSiath: siath.stats.leidas,
+      hojasSiath: tSiath.hoja,
+      porDependencia: resumenDependencias_(siath.filas, 25)
+    },
+    traslados: analizarTraslados_(lsi, porIdSiath, config.palabraFiltro || CFG.PALABRA_FILTRO,
+                                  construirMapaUnidades_(config.mapaUnidades)),
+    conteos: {
+      adicionales: (function () {
+        var q = objetoDetalle_(ad.filas, 'LSI');
+        q.senales = ad.senales;
+        return q;
+      })(),
+      incapacidades: objetoDetalle_(incapacidad),
+      vacaciones: objetoDetalle_(vacaciones),
+      embargosAplicados: objetoDetalle_(embargos, 'SIATH'),
+      embargosFamilia: objetoDetalle_(embFam, 'SIATH'),
+      noOrdenPublico: objetoDetalle_(noOrden, 'SIATH'),
+      comisionesExterior: objetoDetalle_(comExt)
+    },
+    grupos: {
+      Subsidios: gruposSubsidio,
+      Operativos: bloquesOps
+    },
+    avisos: avisos,
+    fueraDelPadron: {
+      lsi: fLsi.fuera.slice(0, 500).map(detalleLsi_),
+      data: fData.fuera.slice(0, 500).map(detalleData_)
+    }
+  };
+  return reporte;
+}
+
+function cruzarNovedades_(tablaNov, tSiath, tLsi, tData, config) {
+  config = config || {};
+  var m = mapearColumnas_(tablaNov.cabeceras, ALIAS.NOV);
+
+  // Índices de referencia: padrón SIATH y subconjuntos cruzados de LSI / DATA.
+  var siathFilas = leerSiath_(tSiath, config).filas;
+  var lsiFilas = leerLsi_(tLsi, config).filas;
+  var dataFilas = leerData_(tData, config).filas;
+  var idxSiath = construirIndices_(siathFilas);
+  var idxLsi = {}, idxData = {};
+  var i;
+  for (i = 0; i < lsiFilas.length; i++) if (idxSiath[lsiFilas[i].id]) idxLsi[lsiFilas[i].id] = true;
+  for (i = 0; i < dataFilas.length; i++) if (idxSiath[dataFilas[i].id]) idxData[dataFilas[i].id] = true;
+
+  var lista = [], vistos = {};
+  for (i = 0; i < tablaNov.filas.length && lista.length < CFG.MAX_NOVEDADES; i++) {
+    var f = tablaNov.filas[i];
+    var id = m.id >= 0 ? idNorm_(val_(f, m, 'id')) : '';
+    if (!id) continue;
+    var nombres = val_(f, m, 'nombres');
+    var apellidos = val_(f, m, 'apellidos');
+    if (!nombres && !apellidos) {
+      var sp = separarNombre_(val_(f, m, 'nombre'));
+      nombres = sp.nombres; apellidos = sp.apellidos;
+    }
+    var enSiath = !!idxSiath[id], enLsi = !!idxLsi[id], enData = !!idxData[id];
+    var clave = id + '|' + norm_(nombres) + '|' + norm_(apellidos);
+    if (vistos[clave]) continue;
+    vistos[clave] = true;
+
+    lista.push({
+      id: id,
+      nombres: nombres,
+      apellidos: apellidos,
+      nombreCompleto: txt_([apellidos, nombres].filter(String).join(' ')),
+      descripcion: val_(f, m, 'descripcion'),
+      anioMes: val_(f, m, 'anioMes'),
+      fecha: val_(f, m, 'fecha'),
+      referencia: val_(f, m, 'referencia'),
+      clase: val_(f, m, 'claseNov'),
+      enSiath: enSiath,
+      enLsi: enLsi,
+      enData: enData,
+      grabado: enSiath,
+      estado: enSiath ? (enLsi ? 'GRABADO Y CRUZADO' : 'GRABADO EN SIATH, SIN NOVEDAD EN LSI')
+                       : 'NO ESTA EN LA BASE SIATH'
+    });
+  }
+
+  var grabadas = [], noGrabadas = [], parciales = [];
+  for (i = 0; i < lista.length; i++) {
+    if (lista[i].enSiath) grabadas.push(lista[i]);
+    else noGrabadas.push(lista[i]);
+    if (lista[i].enSiath && !lista[i].enLsi && !lista[i].enData) parciales.push(lista[i]);
+  }
+
+  // Detalle por tipo de novedad en las que sí quedaron grabadas
+  var porTipo = {};
+  for (i = 0; i < grabadas.length; i++) {
+    var t = norm_(grabadas[i].descripcion) || 'SIN CLASIFICACION';
+    if (!porTipo[t]) porTipo[t] = { tipo: grabadas[i].descripcion || 'SIN CLASIFICACION', total: 0, ids: [] };
+    porTipo[t].total++;
+    if (porTipo[t].ids.length < 500) porTipo[t].ids.push(grabadas[i].id);
+  }
+  var tipos = [];
+  for (var k in porTipo) if (porTipo.hasOwnProperty(k)) tipos.push(porTipo[k]);
+  tipos.sort(function (a, b) { return b.total - a.total; });
+
+  // Nombres master del padrón SIATH: resuelve datos incompletos y
+  // permite detectar diferencias de nombre frente a la novedad subida.
+  var maestro = {};
+  for (i = 0; i < siathFilas.length; i++) maestro[siathFilas[i].id] = siathFilas[i];
+  var nombresDistintos = 0;
+  for (i = 0; i < lista.length; i++) {
+    var ma = maestro[lista[i].id];
+    if (ma) {
+      lista[i].nombresSIATH = ma.nombres;
+      lista[i].apellidosSIATH = ma.apellidos;
+      lista[i].coincideNombre = norm_([lista[i].nombres, lista[i].apellidos].join(' ')) === norm_(ma.nombreCompleto);
+      if (!lista[i].nombres) {
+        lista[i].nombres = ma.nombres;
+        lista[i].apellidos = ma.apellidos;
+        lista[i].nombreCompleto = ma.nombreCompleto;
+      }
+    }
+  }
+  for (i = 0; i < lista.length; i++) if (lista[i].coincideNombre === false) nombresDistintos++;
+
+  return {
+    ok: true,
+    generadoEn: new Date().toISOString(),
+    archivo: {
+      hoja: tablaNov.hoja,
+      filasLeidas: tablaNov.filas.length,
+      registrosUnicos: lista.length,
+      columnas: tablaNov.cabeceras.length,
+      columnasDetectadas: Object.keys(m).filter(function (k) { return m[k] >= 0; })
+    },
+    totales: {
+      novedades: lista.length,
+      grabadas: grabadas.length,
+      noGrabadas: noGrabadas.length,
+      porcentajeGrabado: lista.length ? Math.round(grabadas.length / lista.length * 1000) / 10 : 0,
+      enLsi: lista.filter(function (x) { return x.enLsi; }).length,
+      enData: lista.filter(function (x) { return x.enData; }).length,
+      soloSiathSinNovelty: parciales.length,
+      nombresDistintos: nombresDistintos
+    },
+    porTipo: tipos,
+    detalle: lista.slice(0, CFG.MAX_DETALLE),
+    noEncontradas: noGrabadas.slice(0, CFG.MAX_DETALLE),
+    truncado: lista.length > CFG.MAX_DETALLE
+  };
+}
+
+
+</script>
+<script>
+/* ===== xlsx.js ===== */
+/* =====================================================================
+ *  LECTOR DE XLSX / CSV EN EL NAVEGADOR - sin librerías externas
+ *  ---------------------------------------------------------------------
+ *  Un .xlsx es un archivo ZIP. El navegador moderno puede descomprimir
+ *  con la API nativa DecompressionStream('deflate-raw'), asi que no hace
+ *  falta JSZip ni ninguna descarga externa: el archivo se abre y se
+ *  analiza en el equipo del usuario, sin enviar nada a ningun servidor.
+ *
+ *  Exporta (objeto global XLSX):
+ *    XLSX.leerTablaEn(arrayBuffer, nombre, hojaPreferida) -> Promise<tabla>
+ *    XLSX.listarHojasEn(arrayBuffer)                   -> Promise<[nombres]>
+ *    XLSX.leerArchivo(file, hojaPreferida)             -> Promise<tabla>
+ * ===================================================================== */
+'use strict';
+
+var XLSX = (function () {
+
+  var SIG_EOCD    = [0x50, 0x4b, 0x05, 0x06]; // "PK\x05\x06"
+  var SIG_CENTRAL = [0x50, 0x4b, 0x01, 0x02]; // "PK\x01\x02"
+  var SIG_LOCAL   = [0x50, 0x4b, 0x03, 0x04]; // "PK\x03\x04"
+
+  /* ---------------------------------------------------------------- ZIP */
+
+  function tieneDescompresion() {
+    return typeof DecompressionStream === 'function';
+  }
+
+  /** Inflates raw deflate bytes using the native browser API. */
+  function descomprimir(bytes) {
+    var ds = new DecompressionStream('deflate-raw');
+    var flujo = new Blob([bytes]).stream().pipeThrough(ds);
+    return new Response(flujo).arrayBuffer().then(function (b) {
+      return new Uint8Array(b);
+    });
+  }
+
+  /** Compara 4 bytes contra una firma little-endian. */
+  function esFirma(v, o, sig) {
+    return v[o] === sig[0] && v[o + 1] === sig[1] && v[o + 2] === sig[2] && v[o + 3] === sig[3];
+  }
+
+  /** Localiza la firma EOCD (puede tener hasta 64 KB de comentario detrás). */
+  function buscarEOCD(v) {
+    var min = Math.max(0, v.length - 65557);
+    for (var i = v.length - 22; i >= min; i--) {
+      if (esFirma(v, i, SIG_EOCD)) return i;
+    }
+    throw new Error('El archivo no es un ZIP válido (no se encontró el directorio central).');
+  }
+
+  function u16(v, o) { return v[o] | (v[o + 1] << 8); }
+  function u32(v, o) {
+    return (v[o] | (v[o + 1] << 8) | (v[o + 2] << 16) | (v[o + 3] << 24)) >>> 0;
+  }
+
+  var codificador = new TextDecoder('utf-8');
+
+  function texto(bytes) { return codificador.decode(bytes); }
+
+  /**
+   * Abre un ZIP y devuelve un indice { nombre: {offset, compressed, method, size} }
+   * mas una funcion para extraer cada entrada.
+   */
+  function abrirZip(buffer) {
+    var v = new Uint8Array(buffer);
+    var eocd = buscarEOCD(v);
+    var total = u16(v, eocd + 10);
+    var cdOffset = u32(v, eocd + 16);
+
+    var indice = {};
+    var p = cdOffset;
+    for (var k = 0; k < total; k++) {
+      if (esFirma(v, p, SIG_CENTRAL)) {
+        var metodo   = u16(v, p + 10);
+        var tamComp  = u32(v, p + 20);
+        var tamOrig  = u32(v, p + 24);
+        var lenNom   = u16(v, p + 28);
+        var lenExtra = u16(v, p + 30);
+        var lenCom   = u16(v, p + 32);
+        var offset   = u32(v, p + 42);
+        var nombre   = texto(v.subarray(p + 46, p + 46 + lenNom));
+
+        indice[nombre] = { metodo: metodo, comprimido: tamComp, original: tamOrig, offset: offset };
+        p += 46 + lenNom + lenExtra + lenCom;
+      } else {
+        break;
+      }
+    }
+
+    /** Extrae una entrada del ZIP como Uint8Array. */
+    function extraer(nombre) {
+      var e = indice[nombre];
+      if (!e) throw new Error('No se encontró "' + nombre + '" dentro del archivo.');
+      var lo = e.offset;
+      if (!esFirma(v, lo, SIG_LOCAL)) throw new Error('Cabecera local inválida en "' + nombre + '".');
+      var lenNom = u16(v, lo + 26);
+      var lenExtra = u16(v, lo + 28);
+      var ini = lo + 30 + lenNom + lenExtra;
+      var bruto = v.subarray(ini, ini + e.comprimido);
+
+      if (e.metodo === 0) return Promise.resolve(bruto);
+      if (e.metodo === 8) return descomprimir(bruto);
+      throw new Error('Método de compresión ZIP no soportado (' + e.metodo + ') en "' + nombre + '".');
+    }
+
+    return { indice: indice, extraer: extraer };
+  }
+
+  /* -------------------------------------------------------------- XLSX */
+
+  /** Convierte "BC12" -> 55 (indice de columna base 1). */
+  function colIdx_(ref) {
+    var letras = String(ref).replace(/[^A-Za-z]/g, '').toUpperCase();
+    var n = 0;
+    for (var i = 0; i < letras.length; i++) n = n * 26 + (letras.charCodeAt(i) - 64);
+    return n;
+  }
+  // Disponible tambien para el motor y la interfaz
+  if (typeof window !== 'undefined') window.colIdx_ = colIdx_;
+
+  function bytesDeEntrada(v, offset) {
+    return { v: v, base: offset };
+  }
+
+  /** Lee xl/workbook.xml + rels y devuelve [{nombre, ruta}]. */
+  function listarHojas(zip) {
+    return zip.extraer('xl/workbook.xml').then(function (b) {
+      var xml = texto(b);
+      var rels = {};
+      return zip.extraer('xl/_rels/workbook.xml.rels').then(function (rb) {
+        var rx = texto(rb);
+        var reR = /<Relationship\b([^>]*)\/>/g, m;
+        while ((m = reR.exec(rx))) {
+          var at = {};
+          var reA = /(\w+)="([^"]*)"/g, a;
+          while ((a = reA.exec(m[1]))) at[a[1]] = a[2];
+          if (at.Id && at.Target) rels[at.Id] = at.Target.replace(/^\/?xl\//, '').replace(/^\//, '');
+        }
+        return rels;
+      }).then(function (rels) {
+        var hojas = [], reS = /<sheet\b([^>]*)\/>/g, s;
+        while ((s = reS.exec(xml))) {
+          var at2 = {}, reA2 = /([\w:]+)="([^"]*)"/g, c;
+          while ((c = reA2.exec(s[1]))) at2[c[1]] = c[2];
+          var rid = at2['r:id'] || at2.id;
+          hojas.push({
+            nombre: decXml_(at2.name || ''),
+            ruta: rels[rid] ? ('xl/' + rels[rid]) : ''
+          });
+        }
+        return hojas;
+      });
+    });
+  }
+
+  /** Elige hoja: coincidencia exacta > nombre con la palabra de filtro > primera. */
+  function elegirHoja(hojas, preferencia) {
+    if (!hojas || !hojas.length) throw new Error('El libro no contiene hojas.');
+    var pref = normCab_(preferencia || '');
+    var i;
+    if (pref) {
+      for (i = 0; i < hojas.length; i++) {
+        if (normCab_(hojas[i].nombre) === pref) return hojas[i];
+      }
+    }
+    for (i = 0; i < hojas.length; i++) {
+      if (norm_(hojas[i].nombre).indexOf(norm_(CFG.PALABRA_FILTRO)) >= 0) return hojas[i];
+    }
+    return hojas[0];
+  }
+
+  /** Lee sharedStrings.xml -> arreglo de textos. */
+  function leerSharedStrings(zip) {
+    if (!zip.indice['xl/sharedStrings.xml']) return Promise.resolve([]);
+    return zip.extraer('xl/sharedStrings.xml').then(function (b) {
+      var xml = texto(b);
+      var out = [];
+      var re = /<si\b[^>]*\/>|<si\b[^>]*>([\s\S]*?)<\/si>/g, m;
+      while ((m = re.exec(xml))) {
+        if (m[1] === undefined) { out.push(''); continue; }
+        var frag = m[1], res = '';
+        var re2 = /<t\b[^>]*\/>|<t\b[^>]*>([\s\S]*?)<\/t>/g, t;
+        while ((t = re2.exec(frag))) res += (t[1] === undefined) ? '' : decXml_(t[1]);
+        out.push(res);
+      }
+      return out;
+    });
+  }
+
+  /**
+   * Parsea el XML de una hoja fila por fila.
+   * Se usa el mismo algoritmo que en la version Apps Script.
+   */
+  function leerHoja(bytes, nombreHoja, ss) {
+    var xml = texto(bytes);
+
+    var filas = [];
+    var truncado = false;
+    var reFila = /<row\b[^>]*\/>|<row\b[^>]*>([\s\S]*?)<\/row>/g, mF;
+
+    while ((mF = reFila.exec(xml))) {
+      if (mF[1] === undefined) continue;
+      var frag = mF[1];
+
+      var fila = [], idx = 1;
+      var reC = /<c\b([^>]*)\/>|<c\b([^>]*)>([\s\S]*?)<\/c>/g, mC;
+      while ((mC = reC.exec(frag))) {
+        var attrs = mC[1] !== undefined ? mC[1] : (mC[2] || '');
+        var cuerpo = mC[3] !== undefined ? mC[3] : '';
+
+        var ref = '';
+        var reR = /\br="([^"]*)"/.exec(attrs);
+        if (reR) ref = reR[1];
+        var col = ref ? colIdx_(ref) : idx;
+        idx = col + 1;
+
+        var tipo = '';
+        var reT = /\bt="([^"]*)"/.exec(attrs);
+        if (reT) tipo = reT[1];
+
+        var valor = '';
+        if (tipo === 'inlineStr') {
+          var reI = /<t\b[^>]*>([\s\S]*?)<\/t>/g, mI, acc = '';
+          while ((mI = reI.exec(cuerpo))) acc += decXml_(mI[1]);
+          valor = acc;
+        } else {
+          var reV = /<v\b[^>]*>([\s\S]*?)<\/v>/.exec(cuerpo);
+          if (reV) {
+            var crudo = decXml_(reV[1]);
+            if (tipo === 's') {
+              var n = parseInt(crudo, 10);
+              valor = (isNaN(n) || ss[n] === undefined) ? '' : ss[n];
+            } else {
+              valor = crudo;
+            }
+          }
+        }
+        fila[col - 1] = valor;
+      }
+
+      var ancho = 0;
+      for (var q = 0; q < fila.length; q++) if (fila[q] !== undefined && fila[q] !== '') ancho = q + 1;
+      fila.length = ancho;
+      for (var z = 0; z < ancho; z++) if (fila[z] === undefined) fila[z] = '';
+
+      if (!fila.join('')) continue;
+      filas.push(fila);
+      if (filas.length >= CFG.MAX_FILAS) { truncado = true; break; }
+    }
+
+    if (!filas.length) {
+      return { cabeceras: [], filas: [], truncado: truncado, bytes: bytes.length, hoja: nombreHoja };
+    }
+
+    var cab = filas[0].map(function (h) { return txt_(h); });
+    var cuerpo = filas.slice(1);
+
+    var cabNorm = cab.map(normCab_);
+    var tieneEnc = function (c) {
+      return c === 'IDENTIFICACION' || c === 'IDENTIFICACION_NUEVA' ||
+             c === 'DESCRIPCION' || c === 'NOMBRES' || c === 'NOMBRE' ||
+             c === 'UNIDAD' || c === 'APELLIDOS' || c === 'CATEGORIA';
+    };
+    if (cuerpo.length && !tieneEnc(cabNorm[0])) {
+      var sig = cuerpo[0].map(normCab_);
+      if (sig.some(tieneEnc)) {
+        cab = cuerpo[0].map(function (h) { return txt_(h); });
+        cuerpo = cuerpo.slice(1);
+      }
+    }
+
+    return { cabeceras: cab, filas: cuerpo, truncado: truncado, bytes: bytes.length, hoja: nombreHoja };
+  }
+
+  /* --------------------------------------------------------------- API */
+
+  function leerArchivo(file, preferencia) {
+    var nombre = (file && file.name) || 'archivo';
+    if (!tieneDescompresion()) {
+      return Promise.reject(new Error(
+        'Este navegador no soporta la descompresión ZIP nativa (DecompressionStream). ' +
+        'Use Chrome 103+, Edge 103+ o Firefox 113+.'));
+    }
+    if (file.size > CFG.MAX_BYTES_PKG) {
+      return Promise.reject(new Error('El archivo supera el tamaño máximo permitido (' +
+        Math.round(CFG.MAX_BYTES_PKG / 1048576) + ' MB).'));
+    }
+    return file.arrayBuffer().then(function (buf) {
+      return leerTablaEn(buf, nombre, preferencia);
+    });
+  }
+
+  function listarHojasEn(buffer) {
+    if (!tieneDescompresion()) {
+      return Promise.reject(new Error('Este navegador no soporta la descompresión ZIP nativa.'));
+    }
+    var zip = abrirZip(buffer);
+    return listarHojas(zip).then(function (h) {
+      return h.map(function (x) { return { nombre: x.nombre }; });
+    });
+  }
+
+  function leerTablaEn(buffer, nombre, preferencia) {
+    var nombre = nombre || 'archivo';
+
+    // CSV / TXT
+    if (/\.csv$|\.txt$/i.test(nombre)) {
+      return new Response(buffer).text().then(function (t) {
+        var r = parseDelimitado_(t);
+        return {
+          cabeceras: (r.filas[0] || []).map(function (h) { return txt_(h); }),
+          filas: r.filas.slice(1), truncado: false, bytes: buffer.byteLength, hoja: 'CSV'
+        };
+      });
+    }
+
+    var zip = abrirZip(buffer);
+
+    return listarHojas(zip).then(function (hojas) {
+      if (!hojas.length) throw new Error('El archivo no parece ser un libro de Excel válido.');
+      var elegida = elegirHoja(hojas, preferencia);
+      if (!elegida.ruta || !zip.indice[elegida.ruta]) {
+        throw new Error('No se encontró el XML de la hoja "' + elegida.nombre + '".');
+      }
+      var bytesHoja = zip.indice[elegida.ruta].original;
+
+      if (bytesHoja > CFG.MAX_BYTES_HOJA) {
+        throw new Error('La hoja "' + elegida.nombre + '" ocupa ' +
+          Math.round(bytesHoja / 1048576) + ' MB y supera el límite de ' +
+          Math.round(CFG.MAX_BYTES_HOJA / 1048576) + ' MB. ' +
+          'Seleccione una hoja más liviana (por ejemplo la hoja "' + CFG.PALABRA_FILTRO + '").');
+      }
+
+      return Promise.all([leerSharedStrings(zip), zip.extraer(elegida.ruta)])
+        .then(function (r) {
+          var t = leerHoja(r[1], elegida.nombre, r[0]);
+          t.hojasDisponibles = hojas.map(function (h) { return h.nombre; });
+          return t;
+        });
+    });
+  }
+
+  /* --------------------------------------------------------------- CSV */
+
+  function parseDelimitado_(textoCsv, sep) {
+    var out = [], fila = [], val = '', enComillas = false;
+    if (!sep) {
+      sep = (textoCsv.indexOf(';') >= 0 && textoCsv.indexOf(',') < 0) ? ';'
+          : (textoCsv.indexOf('\t') >= 0 && textoCsv.indexOf(',') < 0) ? '\t' : ',';
+    }
+    for (var i = 0; i < textoCsv.length; i++) {
+      var ch = textoCsv[i];
+      if (enComillas) {
+        if (ch === '"') {
+          if (textoCsv[i + 1] === '"') { val += '"'; i++; }
+          else enComillas = false;
+        } else val += ch;
+      } else {
+        if (ch === '"') enComillas = true;
+        else if (ch === sep) { fila.push(val); val = ''; }
+        else if (ch === '\n') {
+          fila.push(val); out.push(fila); fila = []; val = '';
+          if (out.length >= CFG.MAX_NOVEDADES) break;
+        } else if (ch !== '\r') val += ch;
+      }
+    }
+    if (val.length || fila.length) { fila.push(val); out.push(fila); }
+    var res = [];
+    for (var k = 0; k < out.length; k++) if (out[k].join('').trim() !== '') res.push(out[k]);
+    return { separador: sep, filas: res };
+  }
+
+  return {
+    abrirZip: abrirZip,
+    leerArchivo: leerArchivo,
+    leerTablaEn: leerTablaEn,
+    listarHojasEn: listarHojasEn,
+    elegirHoja: elegirHoja,
+    parseDelimitado: parseDelimitado_,
+    soportaZip: tieneDescompresion
+  };
+})();
+</script>
+<script>
+/* ===== docx.js ===== */
+/* =====================================================================
+ *  GENERADOR DE .docx EN EL NAVEGADOR - sin librerías externas
+ *  ---------------------------------------------------------------------
+ *  Escribe un ZIP con método "store" + CRC-32 (mismo algoritmo que la
+ *  version Apps Script) y arma un OOXML mínimo pero válido: portada
+ *  institucional, tablas con bordes, encabezado de tabla repetido y
+ *  pie de página con numeración.
+ *
+ *  Exporta (objeto global DOCX):
+ *    DOCX.construir(reporte)  -> string XML de document.xml
+ *    DOCX.generar(reporte)    -> { blob, nombre }
+ *    DOCX.descargar(reporte)  -> dispara la descarga en el navegador
+ * ===================================================================== */
+'use strict';
+
+var DOCX = (function () {
+
+  var codif = new TextEncoder();
+
+  /* ------------------------------------------------------------- CRC-32 */
+
+  var TABLA_CRC = (function () {
+    var t = new Array(256), c, n, k;
+    for (n = 0; n < 256; n++) {
+      c = n;
+      for (k = 0; k < 8; k++) c = (c & 1) ? (0xEDB88320 ^ (c >>> 1)) : (c >>> 1);
+      t[n] = c >>> 0;
+    }
+    return t;
+  })();
+
+  function crc32(bytes) {
+    var c = 0xFFFFFFFF;
+    for (var i = 0; i < bytes.length; i++) c = TABLA_CRC[(c ^ bytes[i]) & 0xFF] ^ (c >>> 8);
+    return (c ^ 0xFFFFFFFF) >>> 0;
+  }
+
+  function pushLE(arr, v, n) {
+    for (var i = 0; i < n; i++) arr.push((v >> (i * 8)) & 0xFF);
+  }
+
+  /** Crea un Blob .docx a partir de [{nombre, texto}]. */
+  function crearZip(archivos, nombre, mime) {
+    var locales = [], centrales = [], offset = 0, i;
+
+    for (i = 0; i < archivos.length; i++) {
+      var nombreBytes = codif.encode(archivos[i].nombre);
+      var datos = codif.encode(archivos[i].texto);
+      var crc = crc32(datos);
+
+      var lh = [0x50, 0x4B, 0x03, 0x04];
+      pushLE(lh, 20, 2); pushLE(lh, 0, 2); pushLE(lh, 0, 2);
+      pushLE(lh, 0, 2); pushLE(lh, 0, 2);
+      pushLE(lh, crc, 4);
+      pushLE(lh, datos.length, 4);
+      pushLE(lh, datos.length, 4);
+      pushLE(lh, nombreBytes.length, 2);
+      pushLE(lh, 0, 2);
+      locales.push(lh, nombreBytes, datos);
+
+      var ch = [0x50, 0x4B, 0x01, 0x02];
+      pushLE(ch, 20, 2);            // version creador    (offset 4)
+      pushLE(ch, 20, 2);            // version necesaria  (offset 6)
+      pushLE(ch, 0, 2);             // flags              (offset 8)
+      pushLE(ch, 0, 2);             // metodo = store     (offset 10)
+      pushLE(ch, 0, 2);             // hora               (offset 12)
+      pushLE(ch, 0, 2);             // fecha              (offset 14)
+      pushLE(ch, crc, 4);           // crc-32             (offset 16)
+      pushLE(ch, datos.length, 4);  // tamano comprimido  (offset 20)
+      pushLE(ch, datos.length, 4);  // tamano original    (offset 24)
+      pushLE(ch, nombreBytes.length, 2); // nombre        (offset 28)
+      pushLE(ch, 0, 2);             // extra              (offset 30)
+      pushLE(ch, 0, 2);             // comentario         (offset 32)
+      pushLE(ch, 0, 2);             // numero de disco    (offset 34)
+      pushLE(ch, 0, 2);             // atributos internos (offset 36)
+      pushLE(ch, 0, 4);             // atributos externos (offset 38)
+      pushLE(ch, offset, 4);        // offset local       (offset 42) -> 46 bytes
+      centrales.push(ch, nombreBytes);
+
+      offset += 30 + nombreBytes.length + datos.length;
+    }
+
+    var centralSize = centrales.reduce(function (a, x) { return a + x.length; }, 0);
+    var eocd = [0x50, 0x4B, 0x05, 0x06];
+    pushLE(eocd, 0, 2); pushLE(eocd, 0, 2);
+    pushLE(eocd, archivos.length, 2); pushLE(eocd, archivos.length, 2);
+    pushLE(eocd, centralSize, 4); pushLE(eocd, offset, 4); pushLE(eocd, 0, 2);
+
+    // OJO: el EOCD va envuelto en un array. Con locales.concat(centrales, eocd)
+    // el concat desplegaria sus numeros sueltos, el total saldria NaN y el
+    // ZIP generado seria vacio.
+    var todos = locales.concat(centrales, [eocd]);
+    var total = todos.reduce(function (a, x) { return a + x.length; }, 0);
+    var plano = new Uint8Array(total);
+    var p = 0;
+    for (i = 0; i < todos.length; i++) {
+      for (var j = 0; j < todos[i].length; j++) plano[p++] = todos[i][j];
+    }
+    return new Blob([plano], { type: mime });
+  }
+
+  /* --------------------------------------------------------- OOXML base */
+
+  var W_NS = 'xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"';
+
+  function p(txt, opts) {
+    opts = opts || {};
+    var pPr = '<w:pPr>' +
+      (opts.align ? '<w:jc w:val="' + opts.align + '"/>' : '') +
+      (opts.espacio ? '<w:spacing w:before="' + opts.espacio + '" w:after="' + (opts.espacioDespues || 60) + '"/>' : '') +
+      (opts.sangria ? '<w:ind w:left="' + opts.sangria + '"/>' : '') +
+      '<w:pBdr>' +
+        (opts.borde ? '<w:top w:val="single" w:sz="12" w:space="4" w:color="' + opts.borde + '"/>' : '') +
+        (opts.borde ? '<w:bottom w:val="single" w:sz="12" w:space="4" w:color="' + opts.borde + '"/>' : '') +
+      '</w:pBdr></w:pPr>';
+    var rPr = '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/><w:b/>' +
+      (opts.tam ? '<w:sz w:val="' + opts.tam + '"/><w:szCs w:val="' + opts.tam + '"/>'
+                : '<w:sz w:val="20"/><w:szCs w:val="20"/>') +
+      '<w:color w:val="' + (opts.color || '1F3864') + '"/>' +
+      (opts.mayus ? '<w:caps/>' : '') + '</w:rPr>';
+    return '<w:p>' + pPr + '<w:r>' + rPr +
+      '<w:t xml:space="preserve">' + escXml_(txt) + '</w:t></w:r></w:p>';
+  }
+
+  function celda(txt, opts) {
+    opts = opts || {};
+    var tcPr = '<w:tcPr><w:tcW w:w="' + (opts.ancho || 2000) + '" w:type="dxa"/>' +
+      (opts.sombra ? '<w:shd w:val="clear" w:color="auto" w:fill="' + opts.sombra + '"/>' : '') +
+      '<w:vAlign w:val="center"/></w:tcPr>';
+    var rPr = '<w:rPr><w:rFonts w:ascii="Calibri" w:hAnsi="Calibri"/>' +
+      '<w:sz w:val="' + (opts.tam || 16) + '"/><w:szCs w:val="' + (opts.tam || 16) + '"/>' +
+      (opts.negrita ? '<w:b/>' : '') +
+      '<w:color w:val="' + (opts.color || '000000') + '"/></w:rPr>';
+    return '<w:tc>' + tcPr + '<w:p><w:pPr><w:spacing w:before="20" w:after="20"/>' +
+      '<w:jc w:val="' + (opts.align || 'left') + '"/></w:pPr>' +
+      '<w:r>' + rPr + '<w:t xml:space="preserve">' + escXml_(txt) + '</w:t></w:r></w:p></w:tc>';
+  }
+
+  function tabla(encabezados, anchos, filas, opciones) {
+    opciones = opciones || {};
+    var bordes = '<w:tblBorders>' +
+      ['top', 'left', 'bottom', 'right', 'insideH', 'insideV'].map(function (b) {
+        return '<w:' + b + ' w:val="single" w:sz="4" w:space="0" w:color="1F3864"/>';
+      }).join('') + '</w:tblBorders>';
+
+    var xml = '<w:tbl><w:tblPr><w:tblStyle w:val="TableGrid"/>' +
+      '<w:tblW w:w="5000" w:type="pct"/>' + bordes +
+      '<w:tblLayout w:type="fixed"/></w:tblPr>';
+
+    xml += '<w:tr><w:trPr><w:tblHeader/></w:trPr>';
+    for (var i = 0; i < encabezados.length; i++) {
+      xml += celda(encabezados[i], {
+        ancho: anchos[i], sombra: opciones.colorEncabezado || '1F3864',
+        color: 'FFFFFF', negrita: true, align: i === 0 ? 'center' : 'left', tam: 16
+      });
+    }
+    xml += '</w:tr>';
+
+    for (var r = 0; r < filas.length; r++) {
+      xml += '<w:tr>';
+      var alterna = (r % 2 === 1) ? (opciones.colorAlterno || 'EDF1F8') : null;
+      for (var c = 0; c < encabezados.length; c++) {
+        xml += celda(filas[r][c] === undefined ? '' : filas[r][c],
+          { ancho: anchos[c], sombra: alterna, align: c === 0 ? 'center' : 'left' });
+      }
+      xml += '</w:tr>';
+    }
+    return xml + '</w:tbl>' + p('', { espacio: 40 });
+  }
+
+  function saltoPagina() {
+    return '<w:p><w:r><w:br w:type="page"/></w:r></w:p>';
+  }
+
+  function fmtInt(n) {
+    n = Number(n || 0);
+    var neg = n < 0; n = Math.abs(Math.round(n));
+    var s = String(n), o = '', c = 0;
+    for (var i = s.length - 1; i >= 0; i--) { o = s[i] + o; c++; if (c % 3 === 0 && i > 0) o = '.' + o; }
+    return (neg ? '-' : '') + o;
+  }
+
+  function fechaTxt() {
+    try {
+      return new Date().toLocaleDateString('es-CO', { day: '2-digit', month: 'long', year: 'numeric' });
+    } catch (e) {
+      return new Date().toLocaleDateString('es-CO');
+    }
+  }
+
+  /* ------------------------------------------------- Tablas del reporte */
+
+  function tablaSimple(cab, filas) {
+    return tabla(cab, anchosDe(cab), filas);
+  }
+
+  function anchosDe(cab) {
+    var total = 9000, n = cab.length;
+    var anchos = [], i;
+    for (i = 0; i < n; i++) anchos.push(Math.round(total / n));
+    return anchos;
+  }
+
+  function tablaGrupo(g) {
+    var filas = g.detalle.map(function (r) {
+      return [r.id, r.nombres, r.apellidos, r.descripcion || '',
+              r.clase || '', r.anioMes || '', r.dias || 0, r.disposicion || '', r.fechaDisposicion || ''];
+    });
+    var cab = ['Identificación', 'Nombres', 'Apellidos', 'Novedad', 'Clase', 'Periodo', 'Días', 'Documento', 'Fecha doc.'];
+    var cab2 = p(g.etiqueta.toUpperCase() + ' — ' + fmtInt(g.registros) + ' registro(s), ' +
+      fmtInt(g.funcionarios) + ' funcionario(s)', { tam: 20, color: '1F3864', espacio: 120 }) +
+      (g.nota ? p(g.nota, { tam: 15, color: '777777', espacio: 20 }) : '') +
+      tabla(cab, [1200, 1400, 1400, 1900, 600, 800, 500, 900, 1000], filas);
+    if (g.truncado) {
+      return cab2 + p('Nota: se muestran los primeros ' + CFG.MAX_DETALLE + ' registros de ' +
+        fmtInt(g.registros) + '.', { tam: 15, color: '8B6914', espacio: 40 });
+    }
+    return cab2;
+  }
+
+  function tablaConceptoSiath(titulo, q) {
+    var filas = q.detalle.map(function (r) {
+      return [r.id, r.nombres, r.apellidos, r.grado, r.cargo || r.descripcion,
+              r.ordenPublico || '', r.embargos || 0, r.embFamilia || 0];
+    });
+    return p(titulo + ' — total ' + fmtInt(q.funcionarios) + ' funcionario(s), ' +
+      fmtInt(q.registros) + ' registro(s)', { tam: 20, color: '1F3864', espacio: 120 }) +
+      tabla(['Identificación', 'Nombres', 'Apellidos', 'Grado', 'Dependencia / Cargo', 'Orden púb.', 'Emb.', 'Emb. Fam.'],
+        [1200, 1500, 1500, 700, 2200, 900, 600, 700], filas);
+  }
+
+  function tablaDetalleMixto(titulo, q) {
+    var filas = q.detalle.map(function (r) {
+      return [r.id, r.nombres, r.apellidos, r.descripcion || r.categoria || '',
+              r.origen || '', r.dias || 0, r.fechaInicio || r.fechaDisposicion || '', r.disposicion || ''];
+    });
+    var cab = ['Identificación', 'Nombres', 'Apellidos', 'Concepto', 'Origen', 'Días', 'Fecha', 'Documento'];
+    return p(titulo + ' — total ' + fmtInt(q.funcionarios) + ' funcionario(s), ' +
+      fmtInt(q.registros) + ' registro(s)', { tam: 20, color: '1F3864', espacio: 120 }) +
+      tabla(cab, [1200, 1500, 1500, 2200, 900, 600, 900, 1200], filas);
+  }
+
+  function tablaTraslados(t, palabra) {
+    var b = [];
+    b.push(p('Se cruzaron las cédulas de todos los traslados contra el padrón de personal nominado de ' +
+      'BASE SIATH. Un traslado se considera "cambio de unidad" cuando el consecutivo de la unidad de ' +
+      'destino (UNDE_CONSECUTIVO_TRASLA_NOMI / _LABOR) es distinto del consecutivo de la unidad ' +
+      'actual del funcionario (EMPL_CONSECUTIVO).', { tam: 16, color: '555555', espacio: 80 }));
+
+    b.push(tabla(['Indicador', 'Cantidad'], [6400, 2600], [
+      ['Total de traslados del padrón ' + palabra, fmtInt(t.total)],
+      ['Funcionarios que quedaron en OTRAS unidades', fmtInt(t.fueraDeUnidad)],
+      ['Funcionarios distintos afectados', fmtInt(t.funcionariosFuera)],
+      ['Traslados que no cambian de unidad', fmtInt(t.sinCambioDeUnidad)],
+      ['Traslados con destino nomina distinto del laboral', fmtInt(t.nominaDistintaLabor)],
+      ['Traslados sin unidad de destino informada', fmtInt(t.sinDestinoInformado)]
+    ]));
+
+    if (!t.porDestino.length) {
+      b.push(p('No se identificaron traslados con cambio de unidad dentro del padrón ' + palabra + '.',
+        { tam: 18, color: '8B0000', espacio: 60 }));
+      return b.join('');
+    }
+
+    b.push(p('7A.1 Distribución por unidad de destino', { tam: 20, color: '1F3864', espacio: 120 }));
+    b.push(tabla(['Unidad de destino', 'Funcionarios'], [7400, 1600],
+      t.porDestino.map(function (d) { return [d.unidad, fmtInt(d.total)]; })));
+
+    b.push(p('7A.2 Detalle de funcionarios que estaban nominalmente en ' + palabra +
+      ' y ahora están en otras unidades — ' + fmtInt(t.fueraDeUnidad) + ' registro(s)',
+      { tam: 20, color: '1F3864', espacio: 120 }));
+
+    b.push(tabla(
+      ['Identificación', 'Nombres', 'Apellidos', 'Unidad de origen', 'Unidad de destino',
+       'Cód. actual', 'Cód. destino', '¿Cambia?', 'Periodo', 'Documento'],
+      [1150, 1300, 1300, 1250, 1750, 850, 850, 700, 700, 850],
+      t.detalle.map(function (r) {
+        return [r.id, r.nombres, r.apellidos, r.unidadNominal, r.unidadDestino,
+                r.consecutivoActual, (r.destinoLaboral || r.destinoNomina),
+                r.cambiaUnidad ? 'SÍ' : 'NO', r.anioMes, r.disposicion];
+      })));
+
+    if (t.truncado) {
+      b.push(p('Nota: se muestran los primeros ' + CFG.MAX_DETALLE + ' registros de ' +
+        fmtInt(t.fueraDeUnidad) + '.', { tam: 15, color: '8B6914', espacio: 40 }));
+    }
+    return b.join('');
+  }
+
+  /* ------------------------------------------------------ Documento */
+
+  function construir(rep) {
+    var b = [];
+
+    /* Portada */
+    b.push(p('POLICÍA NACIONAL DE COLOMBIA', { align: 'center', tam: 32, color: '0B2A5B', mayus: true, espacio: 0 }));
+    b.push(p('Jefatura Nacional de Servicio de Policía - JESEP', { align: 'center', tam: 24, color: '1F3864', espacio: 0 }));
+    b.push(p('Reporte de cruce de información - BASE SIATH / BASE LSI / BASE DATA',
+      { align: 'center', tam: 22, color: '8B6914', borde: 'C9A227', espacio: 120 }));
+    b.push(p('Palabra de filtro aplicada: "' + rep.configuracion.palabraFiltro + '"',
+      { align: 'center', tam: 18, color: '555555', espacio: 0 }));
+    b.push(p('Generado: ' + fechaTxt() + ' | Versión ' + rep.version,
+      { align: 'center', tam: 16, color: '777777', espacio: 200 }));
+
+    b.push(p('PERSONAL NOMINADO SEGÚN BASE SIATH: ' + fmtInt(rep.funcionarios.nominados) + ' FUNCIONARIOS',
+      { align: 'center', tam: 26, color: '8B6914', borde: 'C9A227', espacio: 200 }));
+
+    /* 1. Resumen */
+    b.push(p('1. RESUMEN EJECUTIVO', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(p('Total de personal nominado (BASE SIATH, hoja "' + rep.funcionarios.hojasSiath + '", filtro "' +
+      rep.configuracion.palabraFiltro + '"): ' + fmtInt(rep.funcionarios.nominados) +
+      ' funcionarios. Filas leídas en el archivo: ' + fmtInt(rep.funcionarios.filasLeidasSiath) + '.',
+      { tam: 17, color: '333333', espacio: 60 }));
+
+    b.push(tabla(['Concepto', 'Valor'], [5200, 3800], [
+      ['PERSONAL NOMINADO (funcionarios en el padrón)', fmtInt(rep.funcionarios.nominados)],
+      ['Filas BASE SIATH leídas / filtradas', fmtInt(rep.fuentes.siath.filasLeidas) + ' / ' + fmtInt(rep.fuentes.siath.filas)],
+      ['Filas BASE LSI leídas / cruzadas', fmtInt(rep.fuentes.lsi.filasLeidas) + ' / ' + fmtInt(rep.fuentes.lsi.filas)],
+      ['Filas BASE DATA leídas / cruzadas', fmtInt(rep.fuentes.data.filasLeidas) + ' / ' + fmtInt(rep.fuentes.data.filas)],
+      ['Traslados con cambio de unidad', fmtInt(rep.traslados.fueraDeUnidad) + ' de ' + fmtInt(rep.traslados.total)],
+      ['Periodo novedades (ANO_MES)', rep.fuentes.lsi.periodo || 'No informado'],
+      ['Hojas utilizadas', 'SIATH: ' + rep.fuentes.siath.hoja + ' | LSI: ' + rep.fuentes.lsi.hoja + ' | DATA: ' + rep.fuentes.data.hoja]
+    ]));
+
+    if (rep.funcionarios.porDependencia && rep.funcionarios.porDependencia.length) {
+      b.push(p('1.1 Composición del personal nominado por dependencia (top ' +
+        rep.funcionarios.porDependencia.length + ')', { tam: 20, color: '1F3864', espacio: 120 }));
+      b.push(tabla(['Dependencia / cargo en BASE SIATH', 'Funcionarios'], [7400, 1600],
+        rep.funcionarios.porDependencia.map(function (d) { return [d.dependencia, fmtInt(d.total)]; })));
+    }
+
+    /* 2. Conteos */
+    b.push(p('2. CONTEOS SOLICITADOS', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    var c = rep.conteos;
+    b.push(tabla(['Concepto', 'Registros', 'Funcionarios', 'Días / valor'], [4200, 1400, 1600, 1800], [
+      ['Adicionales de nómina (' + rep.configuracion.marcadorAdicional + ')', fmtInt(c.adicionales.registros), fmtInt(c.adicionales.funcionarios), '-'],
+      ['Incapacidades', fmtInt(c.incapacidades.registros), fmtInt(c.incapacidades.funcionarios), fmtInt(c.incapacidades.dias)],
+      ['Disfrute de vacaciones', fmtInt(c.vacaciones.registros), fmtInt(c.vacaciones.funcionarios), fmtInt(c.vacaciones.dias)],
+      ['Embargos aplicados', fmtInt(c.embargosAplicados.registros), fmtInt(c.embargosAplicados.funcionarios), fmtInt(c.embargosAplicados.dias)],
+      ['Embargos a favor de familia', fmtInt(c.embargosFamilia.registros), fmtInt(c.embargosFamilia.funcionarios), fmtInt(c.embargosFamilia.dias)],
+      ['NO en orden público automático', fmtInt(c.noOrdenPublico.registros), fmtInt(c.noOrdenPublico.funcionarios), '-'],
+      ['Comisiones en el exterior', fmtInt(c.comisionesExterior.registros), fmtInt(c.comisionesExterior.funcionarios), fmtInt(c.comisionesExterior.dias)]
+    ]));
+
+    /* 3. SIATH */
+    b.push(p('3. EMBARGOS, ORDEN PÚBLICO Y SITUACIÓN EN BASE SIATH', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(tablaConceptoSiath('3.1 Funcionarios con EMBARGOS_APLICADOS', c.embargosAplicados));
+    b.push(tablaConceptoSiath('3.2 Funcionarios con EMB_FAMILIA', c.embargosFamilia));
+    b.push(tablaConceptoSiath('3.3 Funcionarios que NO están en ORDEN_PUBLICO_AUTOMATICO', c.noOrdenPublico));
+
+    /* 4. Incapacidades y vacaciones */
+    b.push(p('4. INCAPACIDADES Y DISFRUTE DE VACACIONES', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(tablaDetalleMixto('4.1 Incapacidades', c.incapacidades));
+    b.push(tablaDetalleMixto('4.2 Disfrute de vacaciones', c.vacaciones));
+
+    /* 5. Comisiones exterior */
+    b.push(p('5. COMISIONES EN EL EXTERIOR', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(tablaDetalleMixto('5.1 Detalle', c.comisionesExterior));
+
+    /* 6. Subsidios */
+    b.push(saltoPagina());
+    b.push(p('6. SUBSIDIOS FAMILIARES Y BONIFICACIONES', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(p('Identificación, nombres y apellidos de los funcionarios con novedades de este bloque.',
+      { tam: 16, color: '555555', espacio: 60 }));
+    for (var i = 0; i < rep.grupos.Subsidios.length; i++) b.push(tablaGrupo(rep.grupos.Subsidios[i]));
+
+    /* 7. Operativos */
+    b.push(saltoPagina());
+    b.push(p('7. TRASLADOS, PENSIÓN, LICENCIAS Y BONIFICACIONES', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(p('Quiénes y cuántos, por cada concepto.', { tam: 16, color: '555555', espacio: 60 }));
+    for (var j = 0; j < rep.grupos.Operativos.length; j++) b.push(tablaGrupo(rep.grupos.Operativos[j]));
+
+    /* 7A. Traslados */
+    b.push(saltoPagina());
+    b.push(p('7A. TRASLADOS: FUNCIONARIOS NOMINALMENTE EN ' + rep.configuracion.palabraFiltro +
+      ' QUE QUEDARON EN OTRAS UNIDADES', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(tablaTraslados(rep.traslados, rep.configuracion.palabraFiltro));
+
+    /* 8. Adicionales */
+    b.push(p('8. NOVEDADES ADICIONALES DE NÓMINA', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    b.push(p('Criterio de detección: columna "' + rep.configuracion.marcadorAdicional +
+      '" con valor verdadero, o descripción que contenga la palabra ADICIONAL.',
+      { tam: 16, color: '555555', espacio: 60 }));
+    b.push(tablaDetalleMixto('8.1 Detalle', c.adicionales));
+    if (!c.adicionales.registros) {
+      b.push(p('No se registraron novedades adicionales de nómina en el archivo LSI para el padrón filtrado.',
+        { tam: 18, color: '8B0000', espacio: 60 }));
+    }
+
+    /* 9. Cruce */
+    if (rep.cruce) {
+      b.push(saltoPagina());
+      b.push(p('9. VALIDACIÓN DE NOVEDADES SUBIDAS CONTRA LAS BASES', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+      var cr = rep.cruce;
+      b.push(p('Archivo analizado: ' + (cr.archivo.nombre || '') + ' | Filas leídas: ' +
+        fmtInt(cr.archivo.filasLeidas) + ' | Registros únicos: ' + fmtInt(cr.archivo.registrosUnicos),
+        { tam: 16, color: '555555', espacio: 60 }));
+      b.push(tabla(['Indicador', 'Cantidad'], [6000, 3000], [
+        ['Novedades analizadas', fmtInt(cr.totales.novedades)],
+        ['Grabadas (encontradas en BASE SIATH)', fmtInt(cr.totales.grabadas)],
+        ['NO grabadas (no existen en ninguna base)', fmtInt(cr.totales.noGrabadas)],
+        ['Porcentaje grabado', String(cr.totales.porcentajeGrabado).replace('.', ',') + ' %'],
+        ['Además encontradas en BASE LSI', fmtInt(cr.totales.enLsi)],
+        ['Además encontradas en BASE DATA', fmtInt(cr.totales.enData)],
+        ['Solo en SIATH, sin novedad en LSI ni DATA', fmtInt(cr.totales.soloSiathSinNovelty)]
+      ]));
+
+      b.push(p('9.1 Novedades por tipo y total', { tam: 20, color: '1F3864', espacio: 120 }));
+      b.push(tabla(['Tipo de novedad', 'Total', 'Identificaciones (muestra)'], [3600, 900, 4500],
+        cr.porTipo.map(function (t) { return [t.tipo, fmtInt(t.total), t.ids.join(', ')]; })));
+
+      if (cr.noEncontradas.length) {
+        b.push(p('9.2 NOVEDADES QUE NO ESTÁN GRABADAS EN NINGUNA BASE', { tam: 20, color: '8B0000', espacio: 120 }));
+        b.push(tabla(['Identificación', 'Nombres', 'Apellidos', 'Novedad', 'Referencia', 'Estado'],
+          [1300, 1700, 1700, 1900, 1100, 1300],
+          cr.noEncontradas.map(function (x) {
+            return [x.id, x.nombres, x.apellidos, x.descripcion, x.referencia, x.estado];
+          })));
+      } else {
+        b.push(p('9.2 Todas las novedades cargadas se encuentran grabadas en las bases.',
+          { tam: 18, color: '0B5D1E', espacio: 60 }));
+      }
+
+      b.push(p('9.3 Detalle completo de novedades', { tam: 20, color: '1F3864', espacio: 120 }));
+      b.push(tabla(['Identificación', 'Nombres', 'Apellidos', 'Novedad', 'SIATH', 'LSI', 'DATA', 'Estado'],
+        [1200, 1500, 1500, 2000, 700, 600, 700, 1800],
+        cr.detalle.map(function (x) {
+          return [x.id, x.nombres, x.apellidos, x.descripcion,
+            x.enSiath ? 'SÍ' : 'NO', x.enLsi ? 'SÍ' : 'NO', x.enData ? 'SÍ' : 'NO', x.estado];
+        })));
+    }
+
+    /* 10. Observaciones */
+    b.push(saltoPagina());
+    b.push(p('10. OBSERVACIONES TÉCNICAS DEL PROCESO', { align: 'left', tam: 24, color: '0B2A5B', borde: 'C9A227', espacio: 200 }));
+    var filasAviso = [];
+    for (var k = 0; k < rep.avisos.length; k++) filasAviso.push([fmtInt(k + 1), rep.avisos[k]]);
+    b.push(tabla(['#', 'Observación'], [700, 8300], filasAviso));
+
+    var fuera = (rep.fueraDelPadron.lsi.length + rep.fueraDelPadron.data.length);
+    if (fuera) {
+      b.push(p('Registros de las bases LSI y DATA que no pertenecen al padrón filtrado y por lo tanto ' +
+        'quedaron excluidos del cruce: ' + fmtInt(fuera) + '.', { tam: 18, color: '8B6914', espacio: 120 }));
+    }
+
+    CFG.PAGINAS_ESTIMADAS = String(Math.max(1, Math.ceil(b.join('').length / 24000)));
+    return b.join('');
+  }
+
+  function envolver(cuerpo, paginas) {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:document ' + W_NS + ' xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships">' +
+      '<w:body>' + cuerpo +
+      '<w:sectPr><w:footerReference w:type="default" r:id="rIdFooter"/>' +
+      '<w:pgSz w:w="12240" w:h="15840"/>' +
+      '<w:pgMar w:top="1134" w:right="1134" w:bottom="1134" w:left="1134" w:header="708" w:footer="708" w:gutter="0"/>' +
+      '</w:sectPr></w:body></w:document>';
+  }
+
+  function estilos() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:styles ' + W_NS + '>' +
+      '<w:docDefaults><w:rPrDefault><w:rPr>' +
+      '<w:rFonts w:ascii="Calibri" w:hAnsi="Calibri" w:cs="Calibri"/>' +
+      '<w:sz w:val="20"/><w:szCs w:val="20"/><w:lang w:val="es-CO"/>' +
+      '</w:rPr></w:rPrDefault></w:docDefaults>' +
+      '<w:style w:type="paragraph" w:default="1" w:styleId="Normal"><w:name w:val="Normal"/><w:qFormat/></w:style>' +
+      '<w:style w:type="table" w:styleId="TableGrid"><w:name w:val="Table Grid"/><w:tblPr><w:tblBorders>' +
+      '<w:top w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '<w:left w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '<w:bottom w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '<w:right w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '<w:insideH w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '<w:insideV w:val="single" w:sz="4" w:space="0" w:color="auto"/>' +
+      '</w:tblBorders></w:tblPr></w:style></w:styles>';
+  }
+
+  function pie(paginas) {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<w:ftr ' + W_NS + '><w:p><w:pPr><w:jc w:val="center"/></w:pPr>' +
+      '<w:r><w:rPr><w:sz w:val="14"/><w:color w:val="666666"/></w:rPr>' +
+      '<w:t xml:space="preserve">Policía Nacional de Colombia - Jefatura Nacional de Servicio de Policía (JESEP) | Página </w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="begin"/></w:r>' +
+      '<w:r><w:instrText xml:space="preserve"> PAGE </w:instrText></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="separate"/></w:r>' +
+      '<w:r><w:t>1</w:t></w:r>' +
+      '<w:r><w:fldChar w:fldCharType="end"/></w:r>' +
+      '<w:r><w:rPr><w:sz w:val="14"/><w:color w:val="666666"/></w:rPr>' +
+      '<w:t xml:space="preserve"> de ' + paginas + '</w:t></w:r>' +
+      '</w:p></w:ftr>';
+  }
+
+  function contentTypes() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+      '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+      '<Default Extension="xml" ContentType="application/xml"/>' +
+      '<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>' +
+      '<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>' +
+      '<Override PartName="/word/footer1.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.footer+xml"/>' +
+      '<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>' +
+      '<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>' +
+      '</Types>';
+  }
+
+  function rels() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>' +
+      '<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>' +
+      '<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>' +
+      '</Relationships>';
+  }
+
+  function relsDoc() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+      '<Relationship Id="rIdStyles" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>' +
+      '<Relationship Id="rIdFooter" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/footer" Target="footer1.xml"/>' +
+      '</Relationships>';
+  }
+
+  function core() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" ' +
+      'xmlns:dc="http://purl.org/dc/elements/1.1/">' +
+      '<dc:title>Reporte de cruce SIATH - LSI - DATA</dc:title>' +
+      '<dc:creator>Jefatura Nacional de Servicio de Policía - JESEP</dc:creator>' +
+      '</cp:coreProperties>';
+  }
+
+  function app() {
+    return '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">' +
+      '<Application>Analisis Nomina JESEP (web)</Application></Properties>';
+  }
+
+  var MIME = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+
+  function generar(rep) {
+    var cuerpo = construir(rep);
+    var paginas = CFG.PAGINAS_ESTIMADAS || '1';
+    var nombre = 'Reporte_Cruce_SIATH_LSI_DATA_JESEP.docx';
+    var blob = crearZip([
+      { nombre: '[Content_Types].xml', texto: contentTypes() },
+      { nombre: '_rels/.rels', texto: rels() },
+      { nombre: 'word/_rels/document.xml.rels', texto: relsDoc() },
+      { nombre: 'word/styles.xml', texto: estilos() },
+      { nombre: 'word/document.xml', texto: envolver(cuerpo, paginas) },
+      { nombre: 'word/footer1.xml', texto: pie(paginas) },
+      { nombre: 'docProps/core.xml', texto: core() },
+      { nombre: 'docProps/app.xml', texto: app() }
+    ], nombre, MIME);
+    return { blob: blob, nombre: nombre };
+  }
+
+  function descargar(rep) {
+    var r = generar(rep);
+    var url = URL.createObjectURL(r.blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = r.nombre;
+    document.body.appendChild(a);
+    a.click();
+    setTimeout(function () { URL.revokeObjectURL(url); a.remove(); }, 1500);
+    return r.blob.size;
+  }
+
+  return { construir: construir, generar: generar, descargar: descargar, crearZip: crearZip };
+})();
+</script>
+<script>
+/* ===== ui.js ===== */
+/* =====================================================================
+ *  CAPA DE PRESENTACION - version web (GitHub Pages)
+ *  -------------------------------------------------------------------
+ *  Este archivo se GENERA desde appscript/Index.html (ver tools/), para que
+ *  la version web y la de Apps Script muestren exactamente lo mismo.
+ *
+ *  No se copian las funciones que dependian de google.script.run; esas
+ *  estan reescritas en js/app.js sobre XLSX / DOCX / analizarTablas_.
+ * ===================================================================== */
+'use strict';
+
 var ARCHIVOS = { siath:null, lsi:null, data:null, nov:null };
 var REPORTE  = null;
 var CRUCE    = null;
+var _filtroGlobal = 'JESEP';
 
-/* ============================================================
-   UTILIDADES DE PRESENTACIÓN
-   ============================================================ */
 function esc(v){
   if(v===null||v===undefined) return '';
   return String(v).replace(/&/g,'&amp;').replace(/</g,'&lt;')
                   .replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');
 }
+
 function num(n){
   n = Number(n||0);
   var neg = n<0; n = Math.abs(Math.round(n));
@@ -519,6 +2560,7 @@ function num(n){
   for(var i=s.length-1;i>=0;i--){ o=s[i]+o; c++; if(c%3===0 && i>0) o='.'+o; }
   return (neg?'-':'')+o;
 }
+
 function fechaExcel(v){
   if(!v) return '';
   var n = Number(v);
@@ -528,12 +2570,15 @@ function fechaExcel(v){
   }
   return String(v);
 }
+
 function $(id){ return document.getElementById(id); }
+
 function bytesTxt(b){
   if(!b) return '';
   if(b>1048576) return (b/1048576).toFixed(1)+' MB';
   return Math.round(b/1024)+' KB';
 }
+
 function aviso(msg,tipo){
   var c=$('mensajes');
   var d=document.createElement('div');
@@ -542,148 +2587,11 @@ function aviso(msg,tipo){
   c.appendChild(d);
   c.scrollIntoView({behavior:'smooth',block:'nearest'});
 }
+
 function limpiarMensajes(){ $('mensajes').innerHTML=''; }
+
 function Occupation(v){ $('girador').classList.toggle('visible', !!v); }
 
-/* ============================================================
-   LECTURA DE ARCHIVO -> BASE64 (por trozos, sin desbordes)
-   ============================================================ */
-function leerComoBase64(file, alProgreso){
-  return new Promise(function(resolve, reject){
-    var lector = new FileReader();
-    lector.onerror = function(){ reject(new Error('No se pudo leer el archivo.')); };
-    lector.onload = function(){
-      var bytes = new Uint8Array(lector.result);
-      var trozos = 0x8000, partes = [], total = Math.ceil(bytes.length/trozos);
-      for(var i=0;i<bytes.length;i+=trozos){
-        partes.push(String.fromCharCode.apply(null, bytes.subarray(i, i+trozos)));
-      }
-      var b64 = btoa(partes.join(''));
-      if(alProgreso) alProgreso(100);
-      resolve(b64);
-    };
-    lector.readAsArrayBuffer(file);
-  });
-}
-
-/* ============================================================
-   SUBIDA DE UNA BASE
-   ============================================================ */
-function subir(clave, inputId, zonaId, infoId, barraId, selId){
-  var file = $(inputId).files[0];
-  if(!file) return Promise.reject(new Error('Seleccione un archivo primero.'));
-
-  var zona = $(zonaId), info = $(infoId), barra = $(barraId), txt = $(zonaId).querySelector('div[id^=txt]');
-  zona.classList.remove('lista'); zona.classList.add('cargando');
-  info.classList.add('visible'); barra.classList.add('visible');
-  barra.firstElementChild.style.width='8%';
-  txt.innerHTML = 'Subiendo <b>'+esc(file.name)+'</b> ('+bytesTxt(file.size)+')…';
-
-  return leerComoBase64(file, function(p){ barra.firstElementChild.style.width = (p*0.7)+'%'; })
-    .then(function(b64){
-      return new Promise(function(res, rej){
-        google.script.run
-          .withSuccessHandler(function(r){
-            barra.firstElementChild.style.width='100%';
-            if(!r.ok){ rej(new Error(r.error)); return; }
-            ARCHIVOS[clave] = { fileId:r.fileId, nombre:file.name, hoja:'' };
-            zona.classList.add('lista');
-            txt.innerHTML = '<span class="ok">✓ Cargado</span> · '+esc(file.name)+
-                            ' ('+bytesTxt(r.bytes)+')';
-            listarHojas(clave, r.fileId, selId, txt);
-            res(r);
-          })
-          .withFailureHandler(function(e){ rej(new Error(e && e.message ? e.message : String(e))); })
-          .apiSubirArchivo(file.name, b64);
-      });
-    })
-    .catch(function(e){
-      barra.classList.remove('visible');
-      zona.classList.remove('cargando');
-      txt.innerHTML = '<span class="mal">✕ '+esc(e.message)+'</span>';
-      throw e;
-    });
-}
-
-/** Consulta las hojas del archivo y ofrece el selector de hoja. */
-function listarHojas(clave, fileId, selId, txt){
-  google.script.run
-    .withSuccessHandler(function(r){
-      if(!r.ok || !r.hojas || r.hojas.length===0) return;
-      var sel = $(selId), auto = r.hojas.find(function(h){ return /jesep/i.test(h.nombre||''); });
-      sel.innerHTML = '';
-      if(r.tipo==='csv'){
-        sel.style.display='block';
-        sel.innerHTML='<option>CSV</option>';
-        return;
-      }
-      if(r.hojas.length<2){ return; }   // una sola hoja: se usa sola
-      r.hojas.forEach(function(h){
-        var nm = typeof h === 'string' ? h : h.nombre;
-        var mb = (typeof h === 'object' && h.mb!=null) ? (' ('+h.mb+' MB)') : '';
-        var o = document.createElement('option');
-        o.value = nm; o.textContent = nm + mb;
-        if(auto && nm === auto.nombre) o.selected = true;
-        sel.appendChild(o);
-      });
-      sel.style.display='block';
-      sel.onchange = function(){
-        if(ARCHIVOS[clave]) ARCHIVOS[clave].hoja = sel.value;
-      };
-      if(ARCHIVOS[clave]) ARCHIVOS[clave].hoja = sel.value;
-      txt.innerHTML += '<br>Hoja seleccionada: <b>'+esc(sel.value||'automática')+'</b>';
-    })
-    .apiListarHojas(fileId);
-}
-
-/* ============================================================
-   ANÁLISIS
-   ============================================================ */
-function analizar(){
-  limpiarMensajes();
-  if(!ARCHIVOS.siath || !ARCHIVOS.lsi || !ARCHIVOS.data){
-    aviso('Debe cargar los tres archivos: BASE SIATH, BASE LSI y BASE DATA.','err');
-    return;
-  }
-  Occupation(true);
-  $('btnAnalizar').disabled = true;
-
-  var opciones = {
-    palabraFiltro: $('inpPalabra').value.trim() || 'JESEP',
-    marcadorAdicional: $('inpAdicional').value.trim() || 'NOVEDADES_ADICIONALES_NOMINA',
-    mapaUnidades: $('inpUnidades') ? $('inpUnidades').value : '',
-    filtrarPorPalabra: true,
-    cruzaBases: true
-  };
-
-  google.script.run
-    .withSuccessHandler(function(r){
-      Occupation(false);
-      $('btnAnalizar').disabled = false;
-      if(!r.ok){ aviso('Error: '+esc(r.error),'err'); return; }
-      REPORTE = r;
-      if(r.cruce){ CRUCE = r.cruce; ARCHIVOS.nov.nombre = r.cruce.archivo.nombre; }
-      pintarTodo(r);
-      aviso('Cruce completado en '+((r.duracionMs||0)/1000).toFixed(1)+
-            ' s · <b>'+num(r.funcionarios.nominados)+'</b> funcionarios nominados.','ok');
-    })
-    .withFailureHandler(function(e){
-      Occupation(false);
-      $('btnAnalizar').disabled = false;
-      aviso('Fallo del servidor: '+esc(e && e.message ? e.message : e),'err');
-    })
-    .apiAnalizar({
-      siath: ARCHIVOS.siath,
-      lsi:   ARCHIVOS.lsi,
-      data:  ARCHIVOS.data,
-      novedades: ARCHIVOS.nov,
-      opciones: opciones
-    });
-}
-
-/* ============================================================
-   PINTADO
-   ============================================================ */
 function pintarTodo(r){
   $('panel').classList.remove('oculto');
   pintarResumen(r); pintarConteos(r); pintarSubsidios(r);
@@ -793,7 +2701,7 @@ function pintarGrupos(host, grupos, titulo, nota){
   $(host).innerHTML = h;
   ligarBuscadores(host);
 }
-var _filtroGlobal='JESEP';
+
 function r_filtro(){ return _filtroGlobal; }
 
 function tablaDetalle(g, id){
@@ -846,9 +2754,6 @@ function pintarOperativos(r){
   pintarTraslados(r);
 }
 
-/* ============================================================
-   TRASLADOS: nominalmente en el filtro, ahora en otra unidad
-   ============================================================ */
 function pintarTraslados(r){
   var t = r.traslados;
   if(!t){ return; }
@@ -1073,178 +2978,347 @@ function pintarNotas(r){
   $('vistaNotas').innerHTML=h;
 }
 
-/* ============================================================
-   GENERAR WORD
-   ============================================================ */
-function generarWord(){
-  if(!REPORTE || !REPORTE.reportId){
-    aviso('Primero ejecute el análisis del cruce.','err');
-    return;
-  }
-  Occupation(true); $('btnWord').disabled=true;
-  google.script.run
-    .withSuccessHandler(function(r){
-      Occupation(false); $('btnWord').disabled=false;
-      if(!r.ok){ aviso('No se pudo generar el Word: '+esc(r.error),'err'); return; }
-      var bin = atob(r.base64);
-      var arr = new Uint8Array(bin.length);
-      for(var i=0;i<bin.length;i++) arr[i]=bin.charCodeAt(i);
-      var blob = new Blob([arr], {type:'application/vnd.openxmlformats-officedocument.wordprocessingml.document'});
-      var url = URL.createObjectURL(blob);
-      var a = document.createElement('a');
-      a.href=url; a.download=r.nombre; document.body.appendChild(a); a.click();
-      setTimeout(function(){ URL.revokeObjectURL(url); a.remove(); }, 1200);
-      aviso('Archivo Word generado ('+bytesTxt(r.bytes)+'). Se inició la descarga.','ok');
-    })
-    .withFailureHandler(function(e){
-      Occupation(false); $('btnWord').disabled=false;
-      aviso('Error al generar el Word: '+esc(e && e.message ? e.message : e),'err');
-    })
-    .apiGenerarWordReporte(REPORTE.reportId);
-}
 
-/* ============================================================
-   CRUCE DE NOVEDADES
-   ============================================================ */
-function cruzarNovedades(){
-  limpiarMensajes();
-  var file = $('fileNov').files[0];
-  if(!file){ aviso('Seleccione el archivo de novedades realizadas.','err'); return; }
-  if(!ARCHIVOS.siath||!ARCHIVOS.lsi||!ARCHIVOS.data){
-    aviso('Debe tener cargadas las tres bases para poder cruzar.','err'); return;
-  }
-  Occupation(true); $('btnCruce').disabled=true;
-  var barra=$('barraNov'), txt=$('txtNov'), zona=$('zonaNov');
-  zona.classList.remove('lista'); barra.classList.add('visible');
-  barra.firstElementChild.style.width='8%';
-  txt.innerHTML='Subiendo <b>'+esc(file.name)+'</b> ('+bytesTxt(file.size)+')…';
+</script>
+<script>
+/* ===== app.js ===== */
+/* =====================================================================
+ *  APP WEB - analisis de nomina JESEP (GitHub Pages / cualquier hosting)
+ *  ---------------------------------------------------------------------
+ *  Reemplaza a la capa de servidor de la version Apps Script:
+ *    subir archivo   -> se lee el File con FileReader (nada sale del equipo)
+ *    listar hojas    -> XLSX.listarHojasEn(buffer)
+ *    analizar        -> XLSX.leerArchivo + analizarTablas_ (js/engine.js)
+ *    generar Word    -> DOCX.descargar(reporte)   (js/docx.js)
+ *  Exporta (objeto global APP) para que app-ui.js conecte los eventos.
+ * ===================================================================== */
+'use strict';
 
-  leerComoBase64(file, function(p){ barra.firstElementChild.style.width=(p*0.7)+'%'; })
-  .then(function(b64){
-    return new Promise(function(res,rej){
-      google.script.run
-        .withSuccessHandler(function(r){
-          if(!r.ok){ rej(new Error(r.error)); return; }
-          ARCHIVOS.nov={fileId:r.fileId,nombre:file.nombre||file.name,hoja:''};
-          barra.firstElementChild.style.width='100%';
-          res(r);
-        })
-        .withFailureHandler(function(e){ rej(new Error(e&&e.message?e.message:String(e))); })
-        .apiSubirArchivo(file.name, b64);
-    });
-  })
-  .then(function(){
-    google.script.run
-      .withSuccessHandler(function(r){
-        Occupation(false); $('btnCruce').disabled=false;
-        barra.classList.remove('visible'); zona.classList.add('lista');
-        if(!r.ok){ txt.innerHTML='<span class="mal">✕ '+esc(r.error)+'</span>'; return; }
-        txt.innerHTML='<span class="ok">✓ Cargado</span> · '+esc(file.name);
-        CRUCE = r;
-        if(REPORTE){ REPORTE.cruce = r; }
-        pintarCruce(r);
-        $('panel').classList.remove('oculto');
-        document.querySelector('.pestana[data-vista="cruce"]').click();
-        aviso('Cruce terminado: <b>'+num(r.totales.grabadas)+'</b> grabadas y <b>'+
-              num(r.totales.noGrabadas)+'</b> no grabadas.','ok');
-      })
-      .withFailureHandler(function(e){
-        Occupation(false); $('btnCruce').disabled=false;
-        aviso('Error en el cruce: '+esc(e&&e.message?e.message:e),'err');
-      })
-      .apiCruzarNovedades({
-        siath:ARCHIVOS.siath, lsi:ARCHIVOS.lsi, data:ARCHIVOS.data, novedades:ARCHIVOS.nov,
-        opciones:{ palabraFiltro:$('inpPalabra').value.trim()||'JESEP',
-                   marcadorAdicional:$('inpAdicional').value.trim()||'NOVEDADES_ADICIONALES_NOMINA',
-                   mapaUnidades:$('inpUnidades') ? $('inpUnidades').value : '' }
+var APP = (function () {
+
+  /* ------------------------------------------------------------- Estado */
+
+  // Cada base guarda { file:File, buffer:ArrayBuffer, hojas:[], hoja:'' }
+  var bases = { siath: null, lsi: null, data: null, nov: null };
+
+  function tiene(clave) { return !!(bases[clave] && bases[clave].file); }
+
+  function opciones() {
+    var pal = $('inpPalabra');
+    var adi = $('inpAdicional');
+    var uni = $('inpUnidades');
+    return {
+      palabraFiltro: (pal && pal.value.trim()) || 'JESEP',
+      marcadorAdicional: (adi && adi.value.trim()) || 'NOVEDADES_ADICIONALES_NOMINA',
+      mapaUnidades: (uni && uni.value) || '',
+      filtrarPorPalabra: true,
+      cruzaBases: true
+    };
+  }
+
+  /* ------------------------------------------------- Carga de archivos */
+
+  function leerBuffer(file) {
+    if (!file) return Promise.reject(new Error('Seleccione un archivo primero.'));
+    if (!window.File || !file.arrayBuffer) {
+      return new Promise(function (res, rej) {
+        var fr = new FileReader();
+        fr.onload = function () { res(fr.result); };
+        fr.onerror = function () { rej(new Error('No se pudo leer el archivo.')); };
+        fr.readAsArrayBuffer(file);
       });
-  })
-  .catch(function(e){
-    Occupation(false); $('btnCruce').disabled=false;
-    barra.classList.remove('visible');
-    txt.innerHTML='<span class="mal">✕ '+esc(e.message)+'</span>';
-  });
-}
-
-/* ============================================================
-   LIMPIAR TEMPORAL
-   ============================================================ */
-function limpiarTemporal(){
-  google.script.run
-    .withSuccessHandler(function(r){
-      aviso('Archivos temporales eliminados: '+num((r&&r.eliminados)||0),'ok');
-    })
-    .apiLimpiarTemporal();
-}
-
-/* ============================================================
-   EVENTOS
-   ============================================================ */
-document.addEventListener('DOMContentLoaded', function(){
-
-  /* --- Guarda de entorno ---------------------------------------------
-     Esta interfaz usa google.script.run, que SOLO existe cuando Apps
-     Script sirve la pagina (script.google.com/macros/s/.../exec).
-     Si se abre el archivo con doble clic o desde GitHub Pages no hay
-     servidor, y conviene decirlo claro en vez de mostrar un error. */
-  if (typeof google === 'undefined' || !google.script || !google.script.run) {
-    Array.prototype.forEach.call(
-      document.querySelectorAll('.zona, .config, .pestanas'),
-      function(e){ e.style.opacity = '0.35'; e.style.pointerEvents = 'none'; });
-    var c = $('mensajes');
-    if (c) {
-      c.innerHTML =
-        '<div class="aviso err" style="font-size:14px">' +
-        '<b>Esta es la versi&oacute;n de Google Apps Script y no tiene servidor aqu&iacute;.</b><br><br>' +
-        'El objeto <span class="mono">google.script.run</span> solo existe cuando Apps Script sirve ' +
-        'la p&aacute;gina. Al abrirla como un archivo normal no hay nada que atienda las peticiones.<br><br>' +
-        '<b>Elija una de estas dos v&iacute;as:</b><br><br>' +
-        '<b>1) En la nube</b> &mdash; pegue <span class="mono">Code.gs</span> y esta interfaz en ' +
-        '<span class="mono">script.google.com</span>, despliegue como Aplicaci&oacute;n web y abra ' +
-        'la direcci&oacute;n <span class="mono">/exec</span>.<br><br>' +
-        '<b>2) En el navegador (recomendado)</b> &mdash; suba el archivo ' +
-        '<span class="mono">una-sola-pagina/index.html</span> a GitHub Pages, o &aacute;brgalo con ' +
-        'doble clic para probarlo. No requiere cuenta y ning&uacute;n dato sale del equipo.' +
-        '</div>';
     }
-    var s = $('selloVersion');
-    if (s) s.textContent = 'sin servidor';
-    return;
+    return file.arrayBuffer();
   }
-  /* --- Fin de la guarda ------------------------------------------------ */
 
-  $('fileSiath').addEventListener('change', function(){
-    subir('siath','fileSiath','zonaSiath','infoSiath','barraSiath','hojaSiath').catch(function(){});
-  });
-  $('fileLsi').addEventListener('change', function(){
-    subir('lsi','fileLsi','zonaLsi','infoLsi','barraLsi','hojaLsi').catch(function(){});
-  });
-  $('fileData').addEventListener('change', function(){
-    subir('data','fileData','zonaData','infoData','barraData','hojaData').catch(function(){});
-  });
+  /**
+   * Registra el archivo de una base y lista sus hojas en el selector.
+   * No analiza nada todavía: solo lee los encabezados internos del ZIP.
+   */
+  function registrar(clave, inputId, zonaId, infoId, barraId, selId) {
+    var input = document.getElementById(inputId);
+    var file = input && input.files ? input.files[0] : null;
+    if (!file) return Promise.reject(new Error('Seleccione un archivo primero.'));
 
-  $('btnAnalizar').addEventListener('click', analizar);
-  $('btnWord').addEventListener('click', generarWord);
-  $('btnCruce').addEventListener('click', cruzarNovedades);
-  $('btnLimpiar').addEventListener('click', limpiarTemporal);
+    var zona = $(zonaId), info = $(infoId), barra = $(barraId);
+    zona.classList.remove('lista');
+    info.classList.add('visible');
+    barra.classList.add('visible');
+    barra.firstElementChild.style.width = '18%';
+    var txt = info.querySelector('div[id^="txt"]');
+    txt.innerHTML = 'Leyendo <b>' + esc(file.name) + '</b> (' + bytesTxt(file.size) + ')…';
 
-  document.querySelectorAll('.pestana').forEach(function(p){
-    p.addEventListener('click', function(){
-      document.querySelectorAll('.pestana').forEach(function(x){x.classList.remove('activa');});
+    return leerBuffer(file).then(function (buf) {
+      barra.firstElementChild.style.width = '62%';
+      bases[clave] = { file: file, buffer: buf, hojas: [], hoja: '' };
+
+      if (!XLSX.soportaZip()) {
+        zona.classList.add('lista');
+        txt.innerHTML = '<span class="mal">✕ Navegador sin descompresión ZIP</span>';
+        throw new Error('Este navegador no soporta DecompressionStream. Use Chrome 103+, Edge 103+ o Firefox 113+.');
+      }
+
+      return XLSX.listarHojasEn(buf).then(function (hojas) {
+        bases[clave].hojas = hojas;
+        var sel = $(selId);
+        if (sel) {
+          sel.innerHTML = '';
+          if (hojas.length <= 1) {
+            sel.style.display = 'none';
+          } else {
+            var auto = null;
+            hojas.forEach(function (h) { if (!auto && /jesep/i.test(h.nombre)) auto = h.nombre; });
+            hojas.forEach(function (h) {
+              var o = document.createElement('option');
+              o.value = h.nombre;
+              o.textContent = h.nombre;
+              if (auto && h.nombre === auto) o.selected = true;
+              sel.appendChild(o);
+            });
+            sel.style.display = 'block';
+            sel.onchange = function () { if (bases[clave]) bases[clave].hoja = sel.value; };
+            if (bases[clave].hojas.length === 1) bases[clave].hoja = '';
+            else bases[clave].hoja = sel.value;
+          }
+        }
+        barra.firstElementChild.style.width = '100%';
+        zona.classList.add('lista');
+        txt.innerHTML = '<span class="ok">✓ Cargado</span> · ' + esc(file.name) +
+          ' (' + bytesTxt(file.size) + ')' +
+          (bases[clave].hoja ? '<br>Hoja: <b>' + esc(bases[clave].hoja) + '</b>' : '') +
+          (hojas.length > 1 ? '<br><span style="color:#FFC9C2">Puede cambiar de hoja en el selector.</span>' : '');
+        return true;
+      });
+    }).catch(function (e) {
+      barra.classList.remove('visible');
+      zona.classList.remove('lista');
+      txt.innerHTML = '<span class="mal">✕ ' + esc(e.message) + '</span>';
+      bases[clave] = null;
+      throw e;
+    });
+  }
+
+  /* --------------------------------------------------------- Análisis */
+
+  function leerTres() {
+    if (!tiene('siath') || !tiene('lsi') || !tiene('data')) {
+      return Promise.reject(new Error('Debe cargar los tres archivos: BASE SIATH, BASE LSI y BASE DATA.'));
+    }
+    return Promise.all([
+      XLSX.leerTablaEn(bases.siath.buffer, bases.siath.file.name, bases.siath.hoja),
+      XLSX.leerTablaEn(bases.lsi.buffer,   bases.lsi.file.name,   bases.lsi.hoja),
+      XLSX.leerTablaEn(bases.data.buffer,  bases.data.file.name,  bases.data.hoja)
+    ]);
+  }
+
+  function analizar() {
+    limpiarMensajes();
+    Occupation(true);
+    $('btnAnalizar').disabled = true;
+
+    var t0 = Date.now();
+    return leerTres()
+      .then(function (t) {
+        var rep = analizarTablas_(t[0], t[1], t[2], opciones());
+        rep.duracionMs = Date.now() - t0;
+
+        // Cruce opcional con el archivo de novedades ya cargado
+        if (tiene('nov')) {
+          return XLSX.leerTablaEn(bases.nov.buffer, bases.nov.file.name, '')
+            .then(function (tn) {
+              var cr = cruzarNovedades_(tn, t[0], t[1], t[2], opciones());
+              cr.archivo.nombre = bases.nov.file.name;
+              rep.cruce = cr;
+              CRUCE = cr;
+              return rep;
+            })
+            .catch(function (e) {
+              rep.avisos.push('No se pudo procesar el archivo de novedades: ' + e.message);
+              return rep;
+            });
+        }
+        return rep;
+      })
+      .then(function (rep) {
+        Occupation(false);
+        $('btnAnalizar').disabled = false;
+        REPORTE = rep;
+        pintarTodo(rep);
+        aviso('Cruce completado en ' + ((rep.duracionMs || 0) / 1000).toFixed(1) +
+          ' s · <b>' + num(rep.funcionarios.nominados) + '</b> funcionarios nominados.', 'ok');
+        return rep;
+      })
+      .catch(function (e) {
+        Occupation(false);
+        $('btnAnalizar').disabled = false;
+        aviso('Error: ' + esc(e.message), 'err');
+        throw e;
+      });
+  }
+
+  /* ----------------------------------------------- Cruce de novedades */
+
+  function cruzarNovedades() {
+    limpiarMensajes();
+
+    var barra = $('barraNov'), zona = $('zonaNov');
+    zona.classList.remove('lista');
+    barra.classList.add('visible');
+    barra.firstElementChild.style.width = '20%';
+
+    if (!tiene('nov')) {
+      barra.classList.remove('visible');
+      return Promise.reject(new Error('Seleccione el archivo de novedades realizadas.'));
+    }
+    if (!tiene('siath') || !tiene('lsi') || !tiene('data')) {
+      barra.classList.remove('visible');
+      return Promise.reject(new Error('Debe tener cargadas las tres bases para poder cruzar.'));
+    }
+
+    $('txtNov').innerHTML = 'Procesando <b>' + esc(bases.nov.file.name) + '</b>…';
+    barra.firstElementChild.style.width = '45%';
+
+    return Promise.all([
+      XLSX.leerTablaEn(bases.nov.buffer, bases.nov.file.name, ''),
+      XLSX.leerTablaEn(bases.siath.buffer, bases.siath.file.name, bases.siath.hoja),
+      XLSX.leerTablaEn(bases.lsi.buffer, bases.lsi.file.name, bases.lsi.hoja),
+      XLSX.leerTablaEn(bases.data.buffer, bases.data.file.name, bases.data.hoja)
+    ]).then(function (t) {
+      barra.firstElementChild.style.width = '100%';
+      var cr = cruzarNovedades_(t[0], t[1], t[2], t[3], opciones());
+      cr.archivo.nombre = bases.nov.file.name;
+      CRUCE = cr;
+      if (REPORTE) REPORTE.cruce = cr;
+
+      barra.classList.remove('visible');
+      zona.classList.add('lista');
+      $('txtNov').innerHTML = '<span class="ok">✓ Procesado</span> · ' + esc(bases.nov.file.name);
+
+      pintarCruce(cr);
+      $('panel').classList.remove('oculto');
+      var p = document.querySelector('.pestana[data-vista="cruce"]');
+      if (p) p.click();
+      aviso('Cruce terminado: <b>' + num(cr.totales.grabadas) + '</b> grabadas y <b>' +
+        num(cr.totales.noGrabadas) + '</b> no grabadas.', 'ok');
+      return cr;
+    }).catch(function (e) {
+      Occupation(false);
+      barra.classList.remove('visible');
+      $('txtNov').innerHTML = '<span class="mal">✕ ' + esc(e.message) + '</span>';
+      throw e;
+    });
+  }
+
+  /* --------------------------------------------------------- Word */
+
+  function generarWord() {
+    if (!REPORTE) {
+      aviso('Primero ejecute el análisis del cruce.', 'err');
+      return Promise.reject(new Error('Sin reporte.'));
+    }
+    try {
+      var bytes = DOCX.descargar(REPORTE);
+      aviso('Archivo Word generado (' + bytesTxt(bytes) + '). Se inició la descarga.', 'ok');
+      return Promise.resolve({ ok: true, bytes: bytes });
+    } catch (e) {
+      aviso('No se pudo generar el Word: ' + esc(e.message), 'err');
+      return Promise.reject(e);
+    }
+  }
+
+  /* --------------------------------------------------------- Estado */
+
+  function estado() {
+    return Promise.resolve({
+      ok: true,
+      version: CFG.VERSION,
+      palabraFiltro: CFG.PALABRA_FILTRO,
+      marcadorAdicional: CFG.MARCADOR_ADICIONALES
+    });
+  }
+
+  function limpiarTemporal() {
+    bases = { siath: null, lsi: null, data: null, nov: null };
+    aviso('Archivos liberados de la memoria del navegador.', 'ok');
+    return Promise.resolve({ ok: true, eliminados: 0 });
+  }
+
+  return {
+    registrar: registrar,
+    analizar: analizar,
+    cruzarNovedades: cruzarNovedades,
+    generarWord: generarWord,
+    estado: estado,
+    limpiarTemporal: limpiarTemporal,
+    bases: bases
+  };
+})();
+</script>
+<script>
+/* ===== app-ui.js ===== */
+/* =====================================================================
+ *  CONEXION DE EVENTOS - version web
+ *  Solo conecta los controles de la pagina con APP (js/app.js).
+ * ===================================================================== */
+'use strict';
+
+document.addEventListener('DOMContentLoaded', function () {
+
+  function zona(clave, inputId, zonaId, infoId, barraId, selId) {
+    var inp = document.getElementById(inputId);
+    if (!inp) return;
+    inp.addEventListener('change', function () {
+      APP.registrar(clave, inputId, zonaId, infoId, barraId, selId).catch(function () {});
+    });
+  }
+
+  zona('siath', 'fileSiath', 'zonaSiath', 'infoSiath', 'barraSiath', 'hojaSiath');
+  zona('lsi',   'fileLsi',   'zonaLsi',   'infoLsi',   'barraLsi',   'hojaLsi');
+  zona('data',  'fileData',  'zonaData',  'infoData',  'barraData',  'hojaData');
+
+  var inpNov = document.getElementById('fileNov');
+  if (inpNov) {
+    inpNov.addEventListener('change', function () {
+      APP.registrar('nov', 'fileNov', 'zonaNov', 'infoNov', 'barraNov', null).catch(function () {});
+    });
+  }
+
+  var bAnalizar = document.getElementById('btnAnalizar');
+  if (bAnalizar) bAnalizar.addEventListener('click', function () { APP.analizar().catch(function () {}); });
+
+  var bWord = document.getElementById('btnWord');
+  if (bWord) bWord.addEventListener('click', function () { APP.generarWord().catch(function () {}); });
+
+  var bCruce = document.getElementById('btnCruce');
+  if (bCruce) bCruce.addEventListener('click', function () { APP.cruzarNovedades().catch(function () {}); });
+
+  var bLimpiar = document.getElementById('btnLimpiar');
+  if (bLimpiar) bLimpiar.addEventListener('click', function () { APP.limpiarTemporal(); });
+
+  // Pestañas
+  Array.prototype.forEach.call(document.querySelectorAll('.pestana'), function (p) {
+    p.addEventListener('click', function () {
+      Array.prototype.forEach.call(document.querySelectorAll('.pestana'), function (x) {
+        x.classList.remove('activa');
+      });
       p.classList.add('activa');
-      ['resumen','conteos','subsidios','operativos','ausencias','siath','cruce','notas']
-        .forEach(function(v){ $('vista'+v.charAt(0).toUpperCase()+v.slice(1)).classList.toggle('oculto', v!==p.dataset.vista); });
+      ['resumen', 'conteos', 'subsidios', 'operativos', 'ausencias', 'siath', 'cruce', 'notas']
+        .forEach(function (v) {
+          var el = document.getElementById('vista' + v.charAt(0).toUpperCase() + v.slice(1));
+          if (el) el.classList.toggle('oculto', v !== p.dataset.vista);
+        });
     });
   });
 
-  google.script.run
-    .withSuccessHandler(function(r){
-      if(r && r.ok){
-        $('selloVersion').textContent = 'v'+r.version;
-        if(r.palabraFiltro) $('inpPalabra').value = r.palabraFiltro;
-      }
-    })
-    .apiEstado();
+  // Sello de versión
+  APP.estado().then(function (r) {
+    if (r && r.ok) {
+      var s = document.getElementById('selloVersion');
+      if (s) s.textContent = 'v' + r.version;
+      var pal = document.getElementById('inpPalabra');
+      if (pal && r.palabraFiltro && !pal.value) pal.value = r.palabraFiltro;
+    }
+  }).catch(function () {});
 });
 </script>
 </body>
